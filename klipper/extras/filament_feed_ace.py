@@ -812,49 +812,42 @@ class FilamentFeed:
         """Locally reshape a tip stuck above the toolhead inlet."""
         head = self.filament_ch[ch]
         retracts = self.ace.load_tip_recovery_retracts
-        retract_mm = retracts[attempt - 1]
         grind_time = self.ace.load_tip_recovery_grind_time / len(retracts)
         grind_speed = self.ace.load_tip_recovery_grind_speed
-        push_mm = retract_mm + 10
+        push_mm = retracts[-1] + 10
         try:
             self.ace._disable_feed_assist_all()
             self.ace.wait_ace_ready()
-            if not self.ace._v2_arm_fa_for_unload(
-                    head, reason='oversized-tip recovery'):
-                raise RuntimeError('ACE2 rollback assist did not arm')
-
-            self.reactor.pause(self.reactor.monotonic() + 0.5)
             self.gcode.run_script_from_command("M83\r\n")
-            self.gcode.run_script_from_command(
-                "G1 E-%d F400\r\n" % retract_mm)
-            self.toolhead.wait_moves()
-            self.reactor.pause(self.reactor.monotonic() + 0.3)
-            self.ace._disable_feed_assist_all()
-            self.ace.wait_ace_ready()
-
-            grind_before = self.ace.get_v2_feed_mileage_snapshot(
-                ace_idx, slot)
-            remaining = grind_time
-            pulse = 0
-            while remaining > 0.01:
-                seconds = min(3.0, remaining)
-                length = max(1, int(round(
-                    (grind_speed / 60.0) * seconds)))
+            retracted = 0
+            for target_mm in retracts:
+                step_mm = target_mm - retracted
+                if not self.ace._v2_arm_fa_for_unload(
+                        head, reason='oversized-tip range step'):
+                    raise RuntimeError('ACE2 rollback assist did not arm')
+                self.reactor.pause(self.reactor.monotonic() + 0.5)
                 self.gcode.run_script_from_command(
-                    "G1 E%d F%d\r\n" % (length, grind_speed))
+                    "G1 E-%d F400\r\n" % step_mm)
                 self.toolhead.wait_moves()
-                pulse += 1
-                remaining -= seconds
-                grind_after = self.ace.get_v2_feed_mileage_snapshot(
-                    ace_idx, slot)
-                if self.ace.v2_feed_mileage_advanced(
-                        grind_before, grind_after):
-                    logging.info(
-                        '[load-tip-recovery] ACE mileage moved during '
-                        'grind; ending pulses early: head=%d ACE=%d '
-                        'slot=%d attempt=%d pulse=%d',
-                        head, ace_idx, slot, attempt, pulse)
-                    break
+                self.reactor.pause(self.reactor.monotonic() + 0.3)
+                self.ace._disable_feed_assist_all()
+                self.ace.wait_ace_ready()
+                retracted = target_mm
+
+                remaining = grind_time
+                while remaining > 0.01:
+                    seconds = min(3.0, remaining)
+                    length = max(1, int(round(
+                        (grind_speed / 60.0) * seconds)))
+                    self.gcode.run_script_from_command(
+                        "G1 E%d F%d\r\n" % (length, grind_speed))
+                    self.toolhead.wait_moves()
+                    remaining -= seconds
+                logging.info(
+                    '[load-tip-recovery] range position complete: '
+                    'head=%d ACE=%d slot=%d cycle=%d position=%dmm '
+                    'grind=%.2fs F%d', head, ace_idx, slot, attempt,
+                    target_mm, grind_time, grind_speed)
 
             self.ace._arm_fa_for(ace_idx, slot)
             self.reactor.pause(self.reactor.monotonic() + 0.5)
@@ -862,11 +855,19 @@ class FilamentFeed:
                 "G1 E%d F480\r\n" % push_mm)
             self.toolhead.wait_moves()
             self.reactor.pause(self.reactor.monotonic() + 0.3)
+            # Recovery motion is never evidence of a successful load. Stop
+            # ACE2 and let all recovery mileage settle before the caller
+            # starts a fresh flush-only validation window.
+            self.ace._disable_feed_assist_all()
+            self.ace.wait_ace_ready()
+            self.reactor.pause(self.reactor.monotonic() + 0.5)
             logging.info(
                 '[load-tip-recovery] complete: head=%d ACE=%d slot=%d '
-                'attempt=%d retract=%dmm grind=%.1fs F%d push=%dmm',
-                head, ace_idx, slot, attempt, retract_mm,
-                grind_time, grind_speed, push_mm)
+                'cycle=%d range=%d-%dmm grind_total=%.1fs F%d '
+                'push=%dmm', head, ace_idx, slot, attempt,
+                retracts[0], retracts[-1],
+                self.ace.load_tip_recovery_grind_time,
+                grind_speed, push_mm)
             return True
         except Exception as e:
             try:
@@ -1686,8 +1687,8 @@ class FilamentFeed:
                             _flush_cmd += " LENGTH=%d" % _purge_len
 
                         tip_attempt = 0
-                        tip_attempts = (len(
-                            self.ace.load_tip_recovery_retracts)
+                        tip_attempts = (
+                            self.ace.load_tip_recovery_attempts
                             if mileage_check and not filament_soft else 0)
                         if mileage_check and filament_soft:
                             logging.info(
@@ -1699,13 +1700,21 @@ class FilamentFeed:
                         while True:
                             mileage_before = None
                             if mileage_check:
+                                # Re-arm and settle before taking a new
+                                # baseline. All grinding/recovery mileage is
+                                # deliberately outside this validation window.
+                                self.ace._arm_fa_for(
+                                    mileage_ace, mileage_slot)
+                                self.reactor.pause(
+                                    self.reactor.monotonic() + 1.0)
                                 mileage_before = (
                                     self.ace.get_v2_feed_mileage_snapshot(
                                         mileage_ace, mileage_slot))
                                 logging.info(
                                     '[load-mileage] flush baseline head=%d '
                                     'ACE=%d slot=%d tip_attempt=%d/%d '
-                                    'sample=%s', self.filament_ch[ch],
+                                    'sample=%s recovery_mileage_ignored=True',
+                                    self.filament_ch[ch],
                                     mileage_ace, mileage_slot, tip_attempt,
                                     tip_attempts, mileage_before)
 

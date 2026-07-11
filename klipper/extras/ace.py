@@ -16,7 +16,7 @@ from .ace_protocol_v2 import AceProtocolV2
 
 KNOWN_PROTOCOLS = (AceProtocolV1, AceProtocolV2)
 
-MULTIACE_VERSION = "v0.99.3b-MakerDad1.8"
+MULTIACE_VERSION = "v0.99.3b-MakerDad1.9"
 MULTIACE_CODENAME = "Persistent Pesterers"
 
 ACE_API_VERSION = 1
@@ -150,8 +150,10 @@ class MultiAce:
         self.load_length = config.getint('load_length', 2000)         
         self.load_retry = config.getint('load_retry', 3)              
         self.load_retry_retract = config.getint('load_retry_retract', 50)  
+        self.load_tip_recovery_attempts = config.getint(
+            'load_tip_recovery_attempts', 9, minval=0, maxval=20)
         retracts_raw = config.get(
-            'load_tip_recovery_retracts', '16,15,17,14,18,13,19')
+            'load_tip_recovery_retracts', '16,17,18,19,20,21,22,23')
         try:
             self.load_tip_recovery_retracts = [
                 int(v.strip()) for v in retracts_raw.split(',')
@@ -165,6 +167,10 @@ class MultiAce:
                        for v in self.load_tip_recovery_retracts)):
             raise config.error(
                 'load_tip_recovery_retracts requires 1-10 values from 5-40mm')
+        if self.load_tip_recovery_retracts != sorted(set(
+                self.load_tip_recovery_retracts)):
+            raise config.error(
+                'load_tip_recovery_retracts must be unique and increasing')
         self.load_tip_recovery_grind_time = config.getfloat(
             'load_tip_recovery_grind_time', 30.0,
             minval=0.0, maxval=60.0)
