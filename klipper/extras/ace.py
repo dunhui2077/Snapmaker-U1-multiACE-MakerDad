@@ -16,7 +16,7 @@ from .ace_protocol_v2 import AceProtocolV2
 
 KNOWN_PROTOCOLS = (AceProtocolV1, AceProtocolV2)
 
-MULTIACE_VERSION = "v0.99.3b-MakerDad1.6"
+MULTIACE_VERSION = "v0.99.3b-MakerDad1.7"
 MULTIACE_CODENAME = "Persistent Pesterers"
 
 ACE_API_VERSION = 1
@@ -4228,7 +4228,7 @@ class MultiAce:
         if any_running:
             self.dwell(0.3)
 
-    def _v2_arm_fa_for_unload(self, head):
+    def _v2_arm_fa_for_unload(self, head, reason='tip-form'):
         """Arm V2 feed_assist on the slot mapped to `head` so the velocity
         tracker can dispatch mode=3 (rollback assist) during the tip-form
         retract (G1 E-N moves inside INNER_FILAMENT_UNLOAD).
@@ -4269,7 +4269,9 @@ class MultiAce:
             return False
 
         self._v2_active_rev_assist = True
-        self._fa_trace('_v2_active_rev_assist enabled by _v2_arm_fa_for_unload')
+        self._fa_trace(
+            '_v2_active_rev_assist enabled by _v2_arm_fa_for_unload '
+            'reason=%s' % reason)
 
         def _noop_cb(self, response):
             pass
@@ -4278,7 +4280,7 @@ class MultiAce:
         if cur_fa_slot == src_slot:
             self._fa_trace(
                 'unload v2 FA already armed on ACE %d slot %d'
-                % (active_idx, src_slot))
+                ' reason=%s' % (active_idx, src_slot, reason))
             return True
         try:
 
@@ -4296,8 +4298,8 @@ class MultiAce:
                 self._feed_assist_index = src_slot
             self._fa_trace(
                 'unload v2 arm FA on ACE %d slot %d '
-                '(was %d, for rollback-assist during tip-form)'
-                % (active_idx, src_slot, cur_fa_slot))
+                '(was %d, rollback-assist reason=%s)'
+                % (active_idx, src_slot, cur_fa_slot, reason))
             return True
         except Exception as e:
             logging.info('[multiACE] V2 unload arm FA failed: %s' % e)

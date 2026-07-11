@@ -1646,19 +1646,44 @@ class FilamentFeed:
                                 try:
                                     self.ace._disable_feed_assist_all()
                                     self.ace.wait_ace_ready()
-                                    self.ace._retract(
-                                        mileage_slot, 100,
-                                        self.ace.retract_speed,
-                                        head=self.filament_ch[ch])
+                                    head = self.filament_ch[ch]
+                                    armed = self.ace._v2_arm_fa_for_unload(
+                                        head, reason='load-mileage retry')
+                                    if not armed:
+                                        raise RuntimeError(
+                                            'ACE2 rollback assist did not arm')
+                                    # The extruder is the primary puller here;
+                                    # ACE2 follows in rollback-assist mode.
+                                    self.reactor.pause(
+                                        self.reactor.monotonic() + 0.5)
+                                    self.gcode.run_script_from_command(
+                                        "M83\r\n")
+                                    self.gcode.run_script_from_command(
+                                        "G1 E-100 F400\r\n")
+                                    self.toolhead.wait_moves()
+                                    self.reactor.pause(
+                                        self.reactor.monotonic() + 0.3)
+                                    self.ace._disable_feed_assist_all()
                                     self.ace.wait_ace_ready()
+                                    logging.info(
+                                        '[load-mileage] synchronized retry '
+                                        'retract complete: head=%d ACE=%d '
+                                        'slot=%d extruder=100mm F400',
+                                        head, mileage_ace, mileage_slot)
                                 except Exception as retract_e:
+                                    try:
+                                        self.ace._disable_feed_assist_all()
+                                    except Exception:
+                                        pass
                                     logging.error(
-                                        '[load-mileage] 100mm retry retract '
-                                        'failed: %s', retract_e)
+                                        '[load-mileage] synchronized 100mm '
+                                        'extruder/ACE2 retry retract failed: '
+                                        '%s', retract_e)
                                 logging.error(
                                     '[load-mileage] no ACE mileage during '
-                                    'flush; retracted 100mm and requesting '
-                                    'a full load retry')
+                                    'flush; requested synchronized 100mm '
+                                    'extruder/ACE2 retract and a full load '
+                                    'retry')
                                 raise ValueError(
                                     'multiACE load mileage validation failed')
                     except:
