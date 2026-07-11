@@ -174,10 +174,6 @@ if [ "$KEEP_CONFIG" -eq 0 ]; then
     sed -i -E 's/^swap_purge_length:.*/swap_purge_length: 100/' "$ACTIVE_CFG"
     sed -i -E 's/^swap_anti_ooze_retract:.*/swap_anti_ooze_retract: 0/' "$ACTIVE_CFG"
     log "  Applied 1.6 colour-swap migration: flush=100 mm, retract=0 mm"
-    if grep -qE '^load_tip_recovery_retracts:[[:space:]]*16,15,17,14,18,13,19[[:space:]]*$' "$ACTIVE_CFG"; then
-        sed -i -E 's/^load_tip_recovery_retracts:.*/load_tip_recovery_retracts: 16,17,18,19,20,21,22,23/' "$ACTIVE_CFG"
-        log "  Applied 1.9 tip-recovery migration: retract range=16-23 mm"
-    fi
 fi
 mkdir -p "$MULTIACE_DIR"
 cp "$INSTALL_DIR/config/extended/multiace/ace_mode_switch.sh" "$MULTIACE_DIR/ace_mode_switch.sh"

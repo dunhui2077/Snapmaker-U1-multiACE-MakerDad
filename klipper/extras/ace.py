@@ -16,7 +16,7 @@ from .ace_protocol_v2 import AceProtocolV2
 
 KNOWN_PROTOCOLS = (AceProtocolV1, AceProtocolV2)
 
-MULTIACE_VERSION = "v0.99.3b-MakerDad1.9"
+MULTIACE_VERSION = "v0.99.3b-MakerDad2.0"
 MULTIACE_CODENAME = "Persistent Pesterers"
 
 ACE_API_VERSION = 1
@@ -150,44 +150,16 @@ class MultiAce:
         self.load_length = config.getint('load_length', 2000)         
         self.load_retry = config.getint('load_retry', 3)              
         self.load_retry_retract = config.getint('load_retry_retract', 50)  
-        self.load_tip_recovery_attempts = config.getint(
-            'load_tip_recovery_attempts', 9, minval=0, maxval=20)
-        retracts_raw = config.get(
-            'load_tip_recovery_retracts', '16,17,18,19,20,21,22,23')
-        try:
-            self.load_tip_recovery_retracts = [
-                int(v.strip()) for v in retracts_raw.split(',')
-                if v.strip()]
-        except (TypeError, ValueError):
-            raise config.error(
-                'load_tip_recovery_retracts must be comma-separated mm values')
-        if (not self.load_tip_recovery_retracts
-                or len(self.load_tip_recovery_retracts) > 10
-                or any(v < 5 or v > 40
-                       for v in self.load_tip_recovery_retracts)):
-            raise config.error(
-                'load_tip_recovery_retracts requires 1-10 values from 5-40mm')
-        old_18_retracts = [16, 15, 17, 14, 18, 13, 19]
-        if self.load_tip_recovery_retracts == old_18_retracts:
-            self.load_tip_recovery_retracts = list(range(16, 24))
-            logging.warning(
-                '[multiACE] migrated 1.8 load_tip_recovery_retracts '
-                'to 16-23mm at runtime')
-        else:
-            normalized_retracts = sorted(set(
-                self.load_tip_recovery_retracts))
-            if normalized_retracts != self.load_tip_recovery_retracts:
-                logging.warning(
-                    '[multiACE] normalized load_tip_recovery_retracts '
-                    'from %s to %s', self.load_tip_recovery_retracts,
-                    normalized_retracts)
-                self.load_tip_recovery_retracts = normalized_retracts
-        self.load_tip_recovery_grind_time = config.getfloat(
-            'load_tip_recovery_grind_time', 30.0,
-            minval=0.0, maxval=60.0)
-        self.load_tip_recovery_grind_speed = config.getint(
-            'load_tip_recovery_grind_speed', 600,
-            minval=200, maxval=1200)
+        self.load_hall_retract_step = config.getint(
+            'load_hall_retract_step', 5, minval=1, maxval=20)
+        self.load_hall_retract_max = config.getint(
+            'load_hall_retract_max', 100, minval=20, maxval=300)
+        self.load_hall_grind_steps = config.getint(
+            'load_hall_grind_steps', 16, minval=1, maxval=30)
+        self.load_hall_grind_time = config.getfloat(
+            'load_hall_grind_time', 5.0, minval=0.5, maxval=15.0)
+        self.load_hall_grind_speed = config.getint(
+            'load_hall_grind_speed', 1200, minval=200, maxval=1800)
         self.max_dryer_temperature = config.getint('max_dryer_temperature', 55)
 
         self.extra_purge_length = config.getfloat('extra_purge_length', 0, minval=0, maxval=200)

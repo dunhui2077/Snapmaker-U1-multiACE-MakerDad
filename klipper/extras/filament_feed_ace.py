@@ -808,66 +808,110 @@ class FilamentFeed:
             return max(floor, int(ref) - SWAP_PROBE_COOL_DELTA)
         return floor
 
-    def _recover_oversized_load_tip(self, ch, ace_idx, slot, attempt):
-        """Locally reshape a tip stuck above the toolhead inlet."""
+    def _recover_load_from_hall(self, ch, ace_idx, slot, attempt):
+        """Reset to the inlet Hall edge, then grind downward in 1mm steps."""
         head = self.filament_ch[ch]
-        retracts = self.ace.load_tip_recovery_retracts
-        grind_time = self.ace.load_tip_recovery_grind_time / len(retracts)
-        grind_speed = self.ace.load_tip_recovery_grind_speed
-        push_mm = retracts[-1] + 10
+        retract_step = self.ace.load_hall_retract_step
+        retract_max = self.ace.load_hall_retract_max
+        grind_steps = self.ace.load_hall_grind_steps
+        grind_time = self.ace.load_hall_grind_time
+        grind_speed = self.ace.load_hall_grind_speed
+        sensor_name = 'e%d_filament' % head
+        sensor_was_enabled = bool(self.runout_sensor[ch].get_status(
+            self.reactor.monotonic()).get('enabled', True))
+
+        def _hall_detected():
+            return bool(self.runout_sensor[ch].get_status(
+                self.reactor.monotonic()).get('filament_detected', False))
+
         try:
+            self.ace._runout_suppress_heads.add(head)
+            if sensor_was_enabled:
+                self.gcode.run_script_from_command(
+                    'SET_FILAMENT_SENSOR SENSOR=%s ENABLE=0 SAVE=0\r\n'
+                    % sensor_name)
+                self.toolhead.wait_moves()
+            logging.info(
+                '[load-hall-recovery] native runout response suppressed: '
+                'head=%d sensor=%s', head, sensor_name)
             self.ace._disable_feed_assist_all()
             self.ace.wait_ace_ready()
             self.gcode.run_script_from_command("M83\r\n")
+
             retracted = 0
-            for target_mm in retracts:
-                step_mm = target_mm - retracted
+            if _hall_detected():
                 if not self.ace._v2_arm_fa_for_unload(
-                        head, reason='oversized-tip range step'):
+                        head, reason='hall-clear full-force pull'):
                     raise RuntimeError('ACE2 rollback assist did not arm')
                 self.reactor.pause(self.reactor.monotonic() + 0.5)
+            while _hall_detected() and retracted < retract_max:
+                step_mm = min(retract_step, retract_max - retracted)
                 self.gcode.run_script_from_command(
-                    "G1 E-%d F400\r\n" % step_mm)
+                    "G1 E-%d F300\r\n" % step_mm)
                 self.toolhead.wait_moves()
-                self.reactor.pause(self.reactor.monotonic() + 0.3)
-                self.ace._disable_feed_assist_all()
-                self.ace.wait_ace_ready()
-                retracted = target_mm
+                retracted += step_mm
+                self.reactor.pause(self.reactor.monotonic() + 0.1)
+            self.ace._disable_feed_assist_all()
+            self.ace.wait_ace_ready()
+            if _hall_detected():
+                raise RuntimeError(
+                    'inlet Hall remained triggered after %dmm pull'
+                    % retracted)
+            logging.info(
+                '[load-hall-recovery] Hall cleared: head=%d ACE=%d '
+                'slot=%d attempt=%d retract=%dmm',
+                head, ace_idx, slot, attempt, retracted)
 
-                remaining = grind_time
-                while remaining > 0.01:
-                    seconds = min(3.0, remaining)
-                    length = max(1, int(round(
-                        (grind_speed / 60.0) * seconds)))
-                    self.gcode.run_script_from_command(
-                        "G1 E%d F%d\r\n" % (length, grind_speed))
-                    self.toolhead.wait_moves()
-                    remaining -= seconds
-                logging.info(
-                    '[load-tip-recovery] range position complete: '
-                    'head=%d ACE=%d slot=%d cycle=%d position=%dmm '
-                    'grind=%.2fs F%d', head, ace_idx, slot, attempt,
-                    target_mm, grind_time, grind_speed)
-
-            self.ace._arm_fa_for(ace_idx, slot)
-            self.reactor.pause(self.reactor.monotonic() + 0.5)
-            self.gcode.run_script_from_command(
-                "G1 E%d F480\r\n" % push_mm)
-            self.toolhead.wait_moves()
+            # Feed a bounded distance and stop at the first Hall edge. The
+            # extruder does not participate until the sensor is triggered.
+            feed_limit = max(20, retracted + 20)
+            self.ace._feed(slot, feed_limit, self.ace.feed_speed, 0)
+            feed_started = self.reactor.monotonic()
+            self.reactor.pause(feed_started + 0.3)
+            deadline = (feed_started
+                        + (feed_limit / max(1, self.ace.feed_speed)) + 3.0)
+            while (not _hall_detected()
+                    and self.reactor.monotonic() < deadline):
+                if (self.reactor.monotonic() - feed_started > 0.6
+                        and self.ace.is_ace_ready()):
+                    break
+                self.reactor.pause(self.reactor.monotonic() + 0.05)
+            if not _hall_detected():
+                try:
+                    self.ace._stop_feeding(slot)
+                except Exception:
+                    pass
+                raise RuntimeError('ACE2 feed did not trigger inlet Hall')
+            self.ace._stop_feeding(slot)
             self.reactor.pause(self.reactor.monotonic() + 0.3)
-            # Recovery motion is never evidence of a successful load. Stop
-            # ACE2 and let all recovery mileage settle before the caller
-            # starts a fresh flush-only validation window.
+            self.ace.wait_ace_ready()
+
+            # From the Hall edge, ACE2 advances exactly 1mm at a time. ACE2
+            # is stopped during each 5s extruder pulse, so this is grinding,
+            # not an uncontrolled full-path feed. Mileage is never read here.
+            grind_length = max(1, int(round(
+                (grind_speed / 60.0) * grind_time)))
+            for step in range(1, grind_steps + 1):
+                self.ace._feed(slot, 1, min(self.ace.feed_speed, 10))
+                self.ace.wait_ace_ready()
+                self.gcode.run_script_from_command(
+                    "G1 E%d F%d\r\n" % (grind_length, grind_speed))
+                self.toolhead.wait_moves()
+                logging.info(
+                    '[load-hall-recovery] grind step: head=%d ACE=%d '
+                    'slot=%d attempt=%d step=%d/%d depth=%dmm time=%.1fs '
+                    'F%d', head, ace_idx, slot, attempt, step,
+                    grind_steps, step, grind_time, grind_speed)
+
+            # Leave ACE2 stopped. The caller will arm feed assist, wait for
+            # it to settle, take a new flush baseline, and only then flush.
             self.ace._disable_feed_assist_all()
             self.ace.wait_ace_ready()
             self.reactor.pause(self.reactor.monotonic() + 0.5)
             logging.info(
-                '[load-tip-recovery] complete: head=%d ACE=%d slot=%d '
-                'cycle=%d range=%d-%dmm grind_total=%.1fs F%d '
-                'push=%dmm', head, ace_idx, slot, attempt,
-                retracts[0], retracts[-1],
-                self.ace.load_tip_recovery_grind_time,
-                grind_speed, push_mm)
+                '[load-hall-recovery] complete: head=%d ACE=%d slot=%d '
+                'attempt=%d Hall-reset=%dmm grind_steps=%d',
+                head, ace_idx, slot, attempt, retracted, grind_steps)
             return True
         except Exception as e:
             try:
@@ -875,10 +919,25 @@ class FilamentFeed:
             except Exception:
                 pass
             logging.error(
-                '[load-tip-recovery] failed: head=%d ACE=%d slot=%d '
+                '[load-hall-recovery] failed: head=%d ACE=%d slot=%d '
                 'attempt=%d error=%s',
                 head, ace_idx, slot, attempt, e)
             return False
+        finally:
+            self.ace._runout_suppress_heads.discard(head)
+            if sensor_was_enabled:
+                try:
+                    self.gcode.run_script_from_command(
+                        'SET_FILAMENT_SENSOR SENSOR=%s ENABLE=1 SAVE=0\r\n'
+                        % sensor_name)
+                    self.toolhead.wait_moves()
+                    logging.info(
+                        '[load-hall-recovery] native runout response '
+                        'restored: head=%d sensor=%s', head, sensor_name)
+                except Exception as sensor_e:
+                    logging.error(
+                        '[load-hall-recovery] failed to restore sensor %s: '
+                        '%s', sensor_name, sensor_e)
 
     def _do_feed(self, ch, action=None, stage=None, auto_mode=None):
         if ch < 0 or ch >= FEED_CHANNEL_NUMS or action == None:
@@ -1686,13 +1745,14 @@ class FilamentFeed:
                         if _purge_len and _purge_len > 0:
                             _flush_cmd += " LENGTH=%d" % _purge_len
 
-                        tip_attempt = 0
-                        tip_attempts = (
-                            self.ace.load_tip_recovery_attempts
+                        hall_attempt = 0
+                        hall_attempts = (
+                            self.ace.head_load_retry[
+                                self.filament_ch[ch]]
                             if mileage_check and not filament_soft else 0)
                         if mileage_check and filament_soft:
                             logging.info(
-                                '[load-tip-recovery] skipped for soft '
+                                '[load-hall-recovery] skipped for soft '
                                 'filament: head=%d ACE=%d slot=%d',
                                 self.filament_ch[ch], mileage_ace,
                                 mileage_slot)
@@ -1712,11 +1772,11 @@ class FilamentFeed:
                                         mileage_ace, mileage_slot))
                                 logging.info(
                                     '[load-mileage] flush baseline head=%d '
-                                    'ACE=%d slot=%d tip_attempt=%d/%d '
+                                    'ACE=%d slot=%d hall_attempt=%d/%d '
                                     'sample=%s recovery_mileage_ignored=True',
                                     self.filament_ch[ch],
-                                    mileage_ace, mileage_slot, tip_attempt,
-                                    tip_attempts, mileage_before)
+                                    mileage_ace, mileage_slot, hall_attempt,
+                                    hall_attempts, mileage_before)
 
                             self.toolhead.wait_moves()
                             self.gcode.run_script_from_command(
@@ -1733,65 +1793,31 @@ class FilamentFeed:
                                 mileage_before, mileage_after)
                             logging.info(
                                 '[load-mileage] flush result head=%d ACE=%d '
-                                'slot=%d tip_attempt=%d/%d before=%s '
+                                'slot=%d hall_attempt=%d/%d before=%s '
                                 'after=%s advanced=%s',
                                 self.filament_ch[ch], mileage_ace,
-                                mileage_slot, tip_attempt, tip_attempts,
+                                mileage_slot, hall_attempt, hall_attempts,
                                 mileage_before, mileage_after, mileage_ok)
                             if mileage_ok:
                                 break
-                            if tip_attempt >= tip_attempts:
+                            if hall_attempt >= hall_attempts:
                                 break
-                            tip_attempt += 1
-                            if not self._recover_oversized_load_tip(
+                            hall_attempt += 1
+                            if not self._recover_load_from_hall(
                                     ch, mileage_ace, mileage_slot,
-                                    tip_attempt):
+                                    hall_attempt):
                                 break
 
                         if mileage_check and not mileage_ok:
                             self.ace._load_mileage_retry_required = True
+                            self.ace._load_mileage_retry_exhausted = True
                             self.ace._last_load_ok = False
                             self.channel_error[ch] = FEED_ERR_MOVE_EXTRUDE
                             self.exception_code[ch] = 51
-                            try:
-                                self.ace._disable_feed_assist_all()
-                                self.ace.wait_ace_ready()
-                                head = self.filament_ch[ch]
-                                armed = self.ace._v2_arm_fa_for_unload(
-                                    head, reason='load-mileage retry')
-                                if not armed:
-                                    raise RuntimeError(
-                                        'ACE2 rollback assist did not arm')
-                                self.reactor.pause(
-                                    self.reactor.monotonic() + 0.5)
-                                self.gcode.run_script_from_command(
-                                    "M83\r\n")
-                                self.gcode.run_script_from_command(
-                                    "G1 E-100 F400\r\n")
-                                self.toolhead.wait_moves()
-                                self.reactor.pause(
-                                    self.reactor.monotonic() + 0.3)
-                                self.ace._disable_feed_assist_all()
-                                self.ace.wait_ace_ready()
-                                logging.info(
-                                    '[load-mileage] synchronized retry '
-                                    'retract complete: head=%d ACE=%d '
-                                    'slot=%d extruder=100mm F400',
-                                    head, mileage_ace, mileage_slot)
-                            except Exception as retract_e:
-                                try:
-                                    self.ace._disable_feed_assist_all()
-                                except Exception:
-                                    pass
-                                logging.error(
-                                    '[load-mileage] synchronized 100mm '
-                                    'extruder/ACE2 retry retract failed: '
-                                    '%s', retract_e)
                             logging.error(
-                                '[load-mileage] no ACE mileage after %d '
-                                'tip-recovery attempts; requested '
-                                'synchronized 100mm extruder/ACE2 retract '
-                                'and a full load retry', tip_attempt)
+                                '[load-mileage] no flush mileage after %d '
+                                'Hall-guided recoveries; load failed',
+                                hall_attempt)
                             raise ValueError(
                                 'multiACE load mileage validation failed')
                     except:
@@ -2775,6 +2801,7 @@ class FilamentFeed:
                 while True:
                     if self.ace is not None:
                         self.ace._load_mileage_retry_required = False
+                        self.ace._load_mileage_retry_exhausted = False
                     try:
                         self._do_feed(channel, FEED_ACT_LOAD)
                         break
@@ -2782,6 +2809,20 @@ class FilamentFeed:
                         retry_required = (self.ace is not None and getattr(
                             self.ace, '_load_mileage_retry_required', False))
                         if not retry_required:
+                            raise
+                        if getattr(
+                                self.ace, '_load_mileage_retry_exhausted',
+                                False):
+                            mileage_retry_exhausted = True
+                            self.ace._last_load_ok = False
+                            self.ace._load_mileage_retry_required = False
+                            self.ace._load_mileage_retry_exhausted = False
+                            logging.error(
+                                '[load-mileage] Hall-guided retries '
+                                'exhausted inside load operation: head=%d '
+                                'configured=%d; load failed',
+                                self.filament_ch[channel],
+                                mileage_retry_limit)
                             raise
                         if mileage_retry_count >= mileage_retry_limit:
                             mileage_retry_exhausted = True
@@ -2795,7 +2836,7 @@ class FilamentFeed:
                             raise
                         mileage_retry_count += 1
                         logging.error(
-                            '[load-mileage] retry %d/%d after 100mm retract: '
+                            '[load-mileage] legacy full-load retry %d/%d: '
                             'head=%d', mileage_retry_count,
                             mileage_retry_limit,
                             self.filament_ch[channel])
