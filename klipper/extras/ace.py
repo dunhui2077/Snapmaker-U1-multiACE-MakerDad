@@ -167,10 +167,21 @@ class MultiAce:
                        for v in self.load_tip_recovery_retracts)):
             raise config.error(
                 'load_tip_recovery_retracts requires 1-10 values from 5-40mm')
-        if self.load_tip_recovery_retracts != sorted(set(
-                self.load_tip_recovery_retracts)):
-            raise config.error(
-                'load_tip_recovery_retracts must be unique and increasing')
+        old_18_retracts = [16, 15, 17, 14, 18, 13, 19]
+        if self.load_tip_recovery_retracts == old_18_retracts:
+            self.load_tip_recovery_retracts = list(range(16, 24))
+            logging.warning(
+                '[multiACE] migrated 1.8 load_tip_recovery_retracts '
+                'to 16-23mm at runtime')
+        else:
+            normalized_retracts = sorted(set(
+                self.load_tip_recovery_retracts))
+            if normalized_retracts != self.load_tip_recovery_retracts:
+                logging.warning(
+                    '[multiACE] normalized load_tip_recovery_retracts '
+                    'from %s to %s', self.load_tip_recovery_retracts,
+                    normalized_retracts)
+                self.load_tip_recovery_retracts = normalized_retracts
         self.load_tip_recovery_grind_time = config.getfloat(
             'load_tip_recovery_grind_time', 30.0,
             minval=0.0, maxval=60.0)
