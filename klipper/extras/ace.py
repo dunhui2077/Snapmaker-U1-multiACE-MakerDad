@@ -16,7 +16,7 @@ from .ace_protocol_v2 import AceProtocolV2
 
 KNOWN_PROTOCOLS = (AceProtocolV1, AceProtocolV2)
 
-MULTIACE_VERSION = "v0.99.3b-MakerDad1.7"
+MULTIACE_VERSION = "v0.99.3b-MakerDad1.8"
 MULTIACE_CODENAME = "Persistent Pesterers"
 
 ACE_API_VERSION = 1
@@ -150,6 +150,27 @@ class MultiAce:
         self.load_length = config.getint('load_length', 2000)         
         self.load_retry = config.getint('load_retry', 3)              
         self.load_retry_retract = config.getint('load_retry_retract', 50)  
+        retracts_raw = config.get(
+            'load_tip_recovery_retracts', '16,15,17,14,18,13,19')
+        try:
+            self.load_tip_recovery_retracts = [
+                int(v.strip()) for v in retracts_raw.split(',')
+                if v.strip()]
+        except (TypeError, ValueError):
+            raise config.error(
+                'load_tip_recovery_retracts must be comma-separated mm values')
+        if (not self.load_tip_recovery_retracts
+                or len(self.load_tip_recovery_retracts) > 10
+                or any(v < 5 or v > 40
+                       for v in self.load_tip_recovery_retracts)):
+            raise config.error(
+                'load_tip_recovery_retracts requires 1-10 values from 5-40mm')
+        self.load_tip_recovery_grind_time = config.getfloat(
+            'load_tip_recovery_grind_time', 30.0,
+            minval=0.0, maxval=60.0)
+        self.load_tip_recovery_grind_speed = config.getint(
+            'load_tip_recovery_grind_speed', 600,
+            minval=200, maxval=1200)
         self.max_dryer_temperature = config.getint('max_dryer_temperature', 55)
 
         self.extra_purge_length = config.getfloat('extra_purge_length', 0, minval=0, maxval=200)

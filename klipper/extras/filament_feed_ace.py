@@ -808,6 +808,77 @@ class FilamentFeed:
             return max(floor, int(ref) - SWAP_PROBE_COOL_DELTA)
         return floor
 
+    def _recover_oversized_load_tip(self, ch, ace_idx, slot, attempt):
+        """Locally reshape a tip stuck above the toolhead inlet."""
+        head = self.filament_ch[ch]
+        retracts = self.ace.load_tip_recovery_retracts
+        retract_mm = retracts[attempt - 1]
+        grind_time = self.ace.load_tip_recovery_grind_time / len(retracts)
+        grind_speed = self.ace.load_tip_recovery_grind_speed
+        push_mm = retract_mm + 10
+        try:
+            self.ace._disable_feed_assist_all()
+            self.ace.wait_ace_ready()
+            if not self.ace._v2_arm_fa_for_unload(
+                    head, reason='oversized-tip recovery'):
+                raise RuntimeError('ACE2 rollback assist did not arm')
+
+            self.reactor.pause(self.reactor.monotonic() + 0.5)
+            self.gcode.run_script_from_command("M83\r\n")
+            self.gcode.run_script_from_command(
+                "G1 E-%d F400\r\n" % retract_mm)
+            self.toolhead.wait_moves()
+            self.reactor.pause(self.reactor.monotonic() + 0.3)
+            self.ace._disable_feed_assist_all()
+            self.ace.wait_ace_ready()
+
+            grind_before = self.ace.get_v2_feed_mileage_snapshot(
+                ace_idx, slot)
+            remaining = grind_time
+            pulse = 0
+            while remaining > 0.01:
+                seconds = min(3.0, remaining)
+                length = max(1, int(round(
+                    (grind_speed / 60.0) * seconds)))
+                self.gcode.run_script_from_command(
+                    "G1 E%d F%d\r\n" % (length, grind_speed))
+                self.toolhead.wait_moves()
+                pulse += 1
+                remaining -= seconds
+                grind_after = self.ace.get_v2_feed_mileage_snapshot(
+                    ace_idx, slot)
+                if self.ace.v2_feed_mileage_advanced(
+                        grind_before, grind_after):
+                    logging.info(
+                        '[load-tip-recovery] ACE mileage moved during '
+                        'grind; ending pulses early: head=%d ACE=%d '
+                        'slot=%d attempt=%d pulse=%d',
+                        head, ace_idx, slot, attempt, pulse)
+                    break
+
+            self.ace._arm_fa_for(ace_idx, slot)
+            self.reactor.pause(self.reactor.monotonic() + 0.5)
+            self.gcode.run_script_from_command(
+                "G1 E%d F480\r\n" % push_mm)
+            self.toolhead.wait_moves()
+            self.reactor.pause(self.reactor.monotonic() + 0.3)
+            logging.info(
+                '[load-tip-recovery] complete: head=%d ACE=%d slot=%d '
+                'attempt=%d retract=%dmm grind=%.1fs F%d push=%dmm',
+                head, ace_idx, slot, attempt, retract_mm,
+                grind_time, grind_speed, push_mm)
+            return True
+        except Exception as e:
+            try:
+                self.ace._disable_feed_assist_all()
+            except Exception:
+                pass
+            logging.error(
+                '[load-tip-recovery] failed: head=%d ACE=%d slot=%d '
+                'attempt=%d error=%s',
+                head, ace_idx, slot, attempt, e)
+            return False
+
     def _do_feed(self, ch, action=None, stage=None, auto_mode=None):
         if ch < 0 or ch >= FEED_CHANNEL_NUMS or action == None:
             logging.error("[feed] parameter error!")
@@ -1598,7 +1669,6 @@ class FilamentFeed:
 
                     self._set_channel_state(ch, FEED_STA_LOAD_FLUSHING)
                     mileage_check = False
-                    mileage_before = None
                     mileage_ace = None
                     mileage_slot = None
                     if (self.ace is not None
@@ -1607,25 +1677,45 @@ class FilamentFeed:
                         mileage_slot = self.ace._ace_slot_for_head(
                             self.filament_ch[ch])
                         mileage_check = self.ace._is_v2_idx(mileage_ace)
-                        if mileage_check:
-                            mileage_before = self.ace.get_v2_feed_mileage_snapshot(
-                                mileage_ace, mileage_slot)
-                            logging.info(
-                                '[load-mileage] flush baseline head=%d ACE=%d '
-                                'slot=%d sample=%s', self.filament_ch[ch],
-                                mileage_ace, mileage_slot, mileage_before)
                     try:
-                        self.toolhead.wait_moves()
-
                         _purge_len = self.ace.get_purge_length() if self.ace else 0
                         _flush_cmd = ("INNER_FLUSH_FILAMENT TEMP=%d SOFT=%d NOZZLE_DIAMETER=%f" %
                                       (filament_feed_temp, int(filament_soft),
                                        self.toolhead.get_extruder().nozzle_diameter))
                         if _purge_len and _purge_len > 0:
                             _flush_cmd += " LENGTH=%d" % _purge_len
-                        self.gcode.run_script_from_command(_flush_cmd + "\r\n")
-                        self.toolhead.wait_moves()
-                        if mileage_check:
+
+                        tip_attempt = 0
+                        tip_attempts = (len(
+                            self.ace.load_tip_recovery_retracts)
+                            if mileage_check and not filament_soft else 0)
+                        if mileage_check and filament_soft:
+                            logging.info(
+                                '[load-tip-recovery] skipped for soft '
+                                'filament: head=%d ACE=%d slot=%d',
+                                self.filament_ch[ch], mileage_ace,
+                                mileage_slot)
+                        mileage_ok = not mileage_check
+                        while True:
+                            mileage_before = None
+                            if mileage_check:
+                                mileage_before = (
+                                    self.ace.get_v2_feed_mileage_snapshot(
+                                        mileage_ace, mileage_slot))
+                                logging.info(
+                                    '[load-mileage] flush baseline head=%d '
+                                    'ACE=%d slot=%d tip_attempt=%d/%d '
+                                    'sample=%s', self.filament_ch[ch],
+                                    mileage_ace, mileage_slot, tip_attempt,
+                                    tip_attempts, mileage_before)
+
+                            self.toolhead.wait_moves()
+                            self.gcode.run_script_from_command(
+                                _flush_cmd + "\r\n")
+                            self.toolhead.wait_moves()
+                            if not mileage_check:
+                                break
+
                             self.reactor.pause(
                                 self.reactor.monotonic() + 0.25)
                             mileage_after = self.ace.get_v2_feed_mileage_snapshot(
@@ -1634,58 +1724,67 @@ class FilamentFeed:
                                 mileage_before, mileage_after)
                             logging.info(
                                 '[load-mileage] flush result head=%d ACE=%d '
-                                'slot=%d before=%s after=%s advanced=%s',
+                                'slot=%d tip_attempt=%d/%d before=%s '
+                                'after=%s advanced=%s',
                                 self.filament_ch[ch], mileage_ace,
-                                mileage_slot, mileage_before, mileage_after,
-                                mileage_ok)
-                            if not mileage_ok:
-                                self.ace._load_mileage_retry_required = True
-                                self.ace._last_load_ok = False
-                                self.channel_error[ch] = FEED_ERR_MOVE_EXTRUDE
-                                self.exception_code[ch] = 51
+                                mileage_slot, tip_attempt, tip_attempts,
+                                mileage_before, mileage_after, mileage_ok)
+                            if mileage_ok:
+                                break
+                            if tip_attempt >= tip_attempts:
+                                break
+                            tip_attempt += 1
+                            if not self._recover_oversized_load_tip(
+                                    ch, mileage_ace, mileage_slot,
+                                    tip_attempt):
+                                break
+
+                        if mileage_check and not mileage_ok:
+                            self.ace._load_mileage_retry_required = True
+                            self.ace._last_load_ok = False
+                            self.channel_error[ch] = FEED_ERR_MOVE_EXTRUDE
+                            self.exception_code[ch] = 51
+                            try:
+                                self.ace._disable_feed_assist_all()
+                                self.ace.wait_ace_ready()
+                                head = self.filament_ch[ch]
+                                armed = self.ace._v2_arm_fa_for_unload(
+                                    head, reason='load-mileage retry')
+                                if not armed:
+                                    raise RuntimeError(
+                                        'ACE2 rollback assist did not arm')
+                                self.reactor.pause(
+                                    self.reactor.monotonic() + 0.5)
+                                self.gcode.run_script_from_command(
+                                    "M83\r\n")
+                                self.gcode.run_script_from_command(
+                                    "G1 E-100 F400\r\n")
+                                self.toolhead.wait_moves()
+                                self.reactor.pause(
+                                    self.reactor.monotonic() + 0.3)
+                                self.ace._disable_feed_assist_all()
+                                self.ace.wait_ace_ready()
+                                logging.info(
+                                    '[load-mileage] synchronized retry '
+                                    'retract complete: head=%d ACE=%d '
+                                    'slot=%d extruder=100mm F400',
+                                    head, mileage_ace, mileage_slot)
+                            except Exception as retract_e:
                                 try:
                                     self.ace._disable_feed_assist_all()
-                                    self.ace.wait_ace_ready()
-                                    head = self.filament_ch[ch]
-                                    armed = self.ace._v2_arm_fa_for_unload(
-                                        head, reason='load-mileage retry')
-                                    if not armed:
-                                        raise RuntimeError(
-                                            'ACE2 rollback assist did not arm')
-                                    # The extruder is the primary puller here;
-                                    # ACE2 follows in rollback-assist mode.
-                                    self.reactor.pause(
-                                        self.reactor.monotonic() + 0.5)
-                                    self.gcode.run_script_from_command(
-                                        "M83\r\n")
-                                    self.gcode.run_script_from_command(
-                                        "G1 E-100 F400\r\n")
-                                    self.toolhead.wait_moves()
-                                    self.reactor.pause(
-                                        self.reactor.monotonic() + 0.3)
-                                    self.ace._disable_feed_assist_all()
-                                    self.ace.wait_ace_ready()
-                                    logging.info(
-                                        '[load-mileage] synchronized retry '
-                                        'retract complete: head=%d ACE=%d '
-                                        'slot=%d extruder=100mm F400',
-                                        head, mileage_ace, mileage_slot)
-                                except Exception as retract_e:
-                                    try:
-                                        self.ace._disable_feed_assist_all()
-                                    except Exception:
-                                        pass
-                                    logging.error(
-                                        '[load-mileage] synchronized 100mm '
-                                        'extruder/ACE2 retry retract failed: '
-                                        '%s', retract_e)
+                                except Exception:
+                                    pass
                                 logging.error(
-                                    '[load-mileage] no ACE mileage during '
-                                    'flush; requested synchronized 100mm '
-                                    'extruder/ACE2 retract and a full load '
-                                    'retry')
-                                raise ValueError(
-                                    'multiACE load mileage validation failed')
+                                    '[load-mileage] synchronized 100mm '
+                                    'extruder/ACE2 retry retract failed: '
+                                    '%s', retract_e)
+                            logging.error(
+                                '[load-mileage] no ACE mileage after %d '
+                                'tip-recovery attempts; requested '
+                                'synchronized 100mm extruder/ACE2 retract '
+                                'and a full load retry', tip_attempt)
+                            raise ValueError(
+                                'multiACE load mileage validation failed')
                     except:
                         if (self.ace is not None and getattr(
                                 self.ace, '_load_mileage_retry_required',
