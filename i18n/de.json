@@ -19,6 +19,8 @@
     },
     "common": {
       "active": "aktiv",
+      "enabled": "Aktiviert",
+      "disabled": "Deaktiviert",
       "offline": "offline",
       "empty": "leer",
       "select": "wählen",
@@ -105,6 +107,7 @@
       "load_retry": "Load-Retry-Anzahl",
       "extrusion_retry": "Extrusion-Retry-Anzahl",
       "unload_retry": "Unload-Retry-Anzahl",
+      "unload_all_after_print": "Nach Druckende alle Filamente zum ACE entladen",
       "per_slot_overrides": "Pro-Slot Bowden-Overrides",
       "save_restart": "Speichern",
       "form_view": "Formular-Ansicht",

@@ -530,10 +530,11 @@ createApp({
     // these buttons, so block the buttons here instead of in the engine (a
     // command-level block would also kill the print's own swap). Gated on
     // 'printing' ONLY - a PAUSED print still needs Load for runout recovery
-    // (see needsReload). Drying the other ACE mid-print is a wanted feature and
-    // stays enabled (the FA-preserve in _perform_switch + the V2 watchdog keep
-    // the printing head fed).
+    // (see needsReload). Dryer controls are stricter: any active or paused
+    // print blocks changing dryer state.
     const isPrinting = computed(() => state.printer_state === 'printing');
+    const isDryerBlocked = computed(() =>
+      state.printer_state === 'printing' || state.printer_state === 'paused');
     function _blockIfPrinting() {
       if (isPrinting.value) {
         setMacroLog(t("ui.dashboard.blocked_printing"));
@@ -1090,6 +1091,7 @@ createApp({
       load_retry: '',
       extrusion_retry: '',
       unload_retry: '',
+      unload_all_after_print: false,
       state_debug: false,
       usb_debug: false,
       fa_debug: false,
@@ -1151,6 +1153,7 @@ createApp({
       configForm.load_retry        = numOrEmpty(params.load_retry);
       configForm.extrusion_retry   = numOrEmpty(params.extrusion_retry);
       configForm.unload_retry      = numOrEmpty(params.unload_retry);
+      configForm.unload_all_after_print = bool('unload_all_after_print');
       configForm.state_debug    = bool('state_debug');
       configForm.usb_debug      = bool('usb_debug');
       configForm.fa_debug       = bool('fa_debug');
@@ -1215,6 +1218,7 @@ createApp({
         load_retry:         numStr(configForm.load_retry),
         extrusion_retry:    numStr(configForm.extrusion_retry),
         unload_retry:       numStr(configForm.unload_retry),
+        unload_all_after_print: configForm.unload_all_after_print ? 'true' : 'false',
         state_debug:        configForm.state_debug ? 'true' : 'false',
         usb_debug:          configForm.usb_debug   ? 'true' : 'false',
         fa_debug:           configForm.fa_debug    ? 'true' : 'false',
@@ -2386,7 +2390,10 @@ createApp({
         const r = await fetch(`${API}/version`);
         if (r.ok) {
           const j = await r.json();
-          version.value = `v${j.web}`;
+          const webVersion = String(j.web || '');
+          version.value = webVersion.startsWith('v')
+            ? webVersion
+            : `v${webVersion}`;
           const p = j.printer || {};
           printerName.value = p.device_name || "";
           printerFw.value   = p.firmware_version || "";
@@ -2433,7 +2440,7 @@ createApp({
       tab, version, printerName, printerFw, connClass, connText, screenAvailable,
       state, loadError, run, macroLog,
       slotTitle, switchAce, loadSlot, loadFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, setHeadManual, isToolheadOccupied, needsReload, toolheadOps,
-      isPrinting,
+      isPrinting, isDryerBlocked,
       dryerCfg, dryStart, dryStop, saveDrySettings, startAutoDry, stopAutoDry,
       dryOpenAce, toggleDryPanel, aceDrying, autoDryEnabled,
       snapshots, selectedSnapshot, snapshotPreview, saveSnapshot, loadSnapshot, deleteSnapshot,

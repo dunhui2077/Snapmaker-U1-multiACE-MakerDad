@@ -452,7 +452,7 @@ button.slot.state-unknown { background: #333; color: #555; text-shadow: none; }
 }
 .per-ace-row input[type=number]:focus { outline: none; border-color: var(--accent); }
 .per-ace-row input[type=checkbox] { accent-color: var(--accent); }
-.per-slot-block { margin-top: .55rem; }
+.per-slot-block { margin-top: .55rem; max-width: 100%; overflow-x: auto; }
 .per-slot-block summary { cursor: pointer; color: var(--accent); font-size: .8rem;
                           padding: .25rem 0; user-select: none; }
 .per-slot-block summary::marker { color: var(--accent); }
@@ -692,6 +692,12 @@ body { padding-bottom: 64px; }
   .conn { order: 2; }
   .upload-btn { margin-left: auto; }
   .config-row { grid-template-columns: 1fr; }
+  .config-row input, .config-row select { max-width: none; min-width: 0; }
+  .per-slot-table { table-layout: fixed; }
+  .per-slot-table th, .per-slot-table td { overflow-wrap: anywhere; }
+  .per-slot-table input[type=number] { width: 100%; min-width: 0; box-sizing: border-box; }
+  .update-row { flex-wrap: wrap; min-width: 0; }
+  .update-row .muted { min-width: 0; overflow-wrap: anywhere; }
 }
 
 /* Identity provenance badge (spec §4 / D3): where the shown filament

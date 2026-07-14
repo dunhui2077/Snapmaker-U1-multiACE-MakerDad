@@ -53,6 +53,7 @@ for f in \
     "klipper/extras/filament_feed_ace.py" \
     "klipper/extras/filament_switch_sensor_ace.py" \
     "klipper/kinematics/extruder_ace.py" \
+    "tools/post_process_virtual_toolheads.py" \
     "config/extended/ace.cfg" \
     "config/extended/multiace/ace_mode_switch.sh" \
     "config/extended/multiace/ace_vars.cfg"
@@ -68,6 +69,7 @@ if [ "$INSTALL_WEB" = "1" ]; then
         "web/backend/preflight_core.py" \
         "web/frontend/index.html" \
         "web/frontend/app.js" \
+        "web/frontend/preflight_pyodide_worker.js" \
         "web/frontend/style.css" \
         "web/deploy/S98multiace-web"
     do
@@ -78,6 +80,15 @@ if [ "$INSTALL_WEB" = "1" ]; then
     done
 fi
 log "All source files found"
+
+# The Web preflight backend loads the same post-processor used by slicers.
+# Install it in printer_data/config so it remains available independently of
+# the Web deployment directory.
+mkdir -p "$CONFIG_DIR/tools"
+cp "$INSTALL_DIR/tools/post_process_virtual_toolheads.py" \
+   "$CONFIG_DIR/tools/post_process_virtual_toolheads.py"
+chmod 755 "$CONFIG_DIR/tools/post_process_virtual_toolheads.py" 2>/dev/null || true
+log "Installed local G-code processor to $CONFIG_DIR/tools"
 for d in "$EXTRAS_DIR" "$KINEMATICS_DIR" "$CONFIG_DIR"; do
     if [ ! -d "$d" ]; then
         log "ERROR: Target directory not found: $d"
@@ -174,6 +185,13 @@ if [ "$KEEP_CONFIG" -eq 0 ]; then
     sed -i -E 's/^swap_purge_length:.*/swap_purge_length: 100/' "$ACTIVE_CFG"
     sed -i -E 's/^swap_anti_ooze_retract:.*/swap_anti_ooze_retract: 0/' "$ACTIVE_CFG"
     log "  Applied 1.6 colour-swap migration: flush=100 mm, retract=0 mm"
+
+    # MakerDad 3.0 migration: retain six 1mm / 6s grinding steps per cycle.
+    sed -i -E 's/^load_hall_grind_cycles:.*/load_hall_grind_cycles: 3/' "$ACTIVE_CFG"
+    sed -i -E 's/^load_hall_grind_distance:.*/load_hall_grind_distance: 6/' "$ACTIVE_CFG"
+    sed -i -E 's/^load_hall_step_distance:.*/load_hall_step_distance: 1/' "$ACTIVE_CFG"
+    sed -i -E 's/^load_hall_grind_time:.*/load_hall_grind_time: 6/' "$ACTIVE_CFG"
+    log "  Applied 3.0 grinding migration: 3 cycles, 6x1 mm, 6 s/step"
 fi
 mkdir -p "$MULTIACE_DIR"
 cp "$INSTALL_DIR/config/extended/multiace/ace_mode_switch.sh" "$MULTIACE_DIR/ace_mode_switch.sh"
@@ -432,6 +450,7 @@ if [ "$INSTALL_WEB" = "1" ]; then
         "backend/preflight_core.py" \
         "frontend/index.html" \
         "frontend/app.js" \
+        "frontend/preflight_pyodide_worker.js" \
         "frontend/style.css"
     do
         if cmp -s "$WEB_SRC/$f" "$WEB_DEST/$f"; then
