@@ -1,16 +1,14 @@
 #!/bin/bash
 set -e
-INSTALL_WEB=1
+INSTALL_WEB=0
 KEEP_CONFIG=0
 for arg in "$@"; do
     case "$arg" in
         --install-web) INSTALL_WEB=1 ;;
-        --no-install-web) INSTALL_WEB=0 ;;
         --keep-config) KEEP_CONFIG=1 ;;
         --help|-h)
-            echo "Usage: $0 [--install-web|--no-install-web] [--keep-config]"
-            echo "  --install-web      Install multiACE Web (default)"
-            echo "  --no-install-web   Skip multiACE Web installation"
+            echo "Usage: $0 [--install-web] [--keep-config]"
+            echo "  --install-web   Also install multiACE Web (FastAPI + Vue UI)"
             echo "  --keep-config   Don't touch existing ace.cfg at all (default: merge user values from old cfg into new shipped defaults)"
             exit 0
             ;;
@@ -27,6 +25,12 @@ PRINTER_CFG="${HOME_DIR}/printer_data/config/printer.cfg"
 LOG_DIR="${HOME_DIR}/printer_data/logs"
 mkdir -p "$LOG_DIR" 2>/dev/null
 LOGFILE="${LOG_DIR}/multiace_install.log"
+# Dual-user log self-heal (same class as ace_mode_switch.log): a root SSH
+# install creates this file root-owned, the web self-update then runs as
+# lava and tee could not append -> the pipeline failed -> set -e killed
+# the update right after the first log line. Make the file appendable for
+# both users; never let a failed log write abort an install (see log()).
+( touch "$LOGFILE" && chmod 0666 "$LOGFILE" ) 2>/dev/null || true
 IS_ROOT=0
 if [ "$(id -u)" = "0" ]; then
     IS_ROOT=1
@@ -41,7 +45,9 @@ run_as_lava() {
     fi
 }
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [multiACE] $1" | tee -a "$LOGFILE"
+    _line="$(date '+%Y-%m-%d %H:%M:%S') [multiACE] $1"
+    echo "$_line"
+    { echo "$_line" >> "$LOGFILE"; } 2>/dev/null || true
 }
 log "=== multiACE Installation ==="
 log "Install from: $INSTALL_DIR"
@@ -52,8 +58,9 @@ for f in \
     "klipper/extras/ace.py" \
     "klipper/extras/filament_feed_ace.py" \
     "klipper/extras/filament_switch_sensor_ace.py" \
+    "klipper/extras/ace_bg_swap.py" \
+    "klipper/extras/ace_tipform.py" \
     "klipper/kinematics/extruder_ace.py" \
-    "tools/post_process_virtual_toolheads.py" \
     "config/extended/ace.cfg" \
     "config/extended/multiace/ace_mode_switch.sh" \
     "config/extended/multiace/ace_vars.cfg"
@@ -63,32 +70,7 @@ do
         exit 1
     fi
 done
-if [ "$INSTALL_WEB" = "1" ]; then
-    for f in \
-        "web/backend/main.py" \
-        "web/backend/preflight_core.py" \
-        "web/frontend/index.html" \
-        "web/frontend/app.js" \
-        "web/frontend/preflight_pyodide_worker.js" \
-        "web/frontend/style.css" \
-        "web/deploy/S98multiace-web"
-    do
-        if [ ! -f "$INSTALL_DIR/$f" ]; then
-            log "ERROR: Missing Web file: $f"
-            exit 1
-        fi
-    done
-fi
 log "All source files found"
-
-# The Web preflight backend loads the same post-processor used by slicers.
-# Install it in printer_data/config so it remains available independently of
-# the Web deployment directory.
-mkdir -p "$CONFIG_DIR/tools"
-cp "$INSTALL_DIR/tools/post_process_virtual_toolheads.py" \
-   "$CONFIG_DIR/tools/post_process_virtual_toolheads.py"
-chmod 755 "$CONFIG_DIR/tools/post_process_virtual_toolheads.py" 2>/dev/null || true
-log "Installed local G-code processor to $CONFIG_DIR/tools"
 for d in "$EXTRAS_DIR" "$KINEMATICS_DIR" "$CONFIG_DIR"; do
     if [ ! -d "$d" ]; then
         log "ERROR: Target directory not found: $d"
@@ -120,29 +102,58 @@ cp "$INSTALL_DIR/klipper/extras/ace_protocol_v1.py" "$EXTRAS_DIR/ace_protocol_v1
 cp "$INSTALL_DIR/klipper/extras/ace_protocol_v2.py" "$EXTRAS_DIR/ace_protocol_v2.py"
 cp "$INSTALL_DIR/klipper/extras/filament_feed_ace.py" "$EXTRAS_DIR/filament_feed_ace.py"
 cp "$INSTALL_DIR/klipper/extras/filament_switch_sensor_ace.py" "$EXTRAS_DIR/filament_switch_sensor_ace.py"
-chmod 644 "$EXTRAS_DIR/ace.py" "$EXTRAS_DIR/ace_protocol.py" "$EXTRAS_DIR/ace_protocol_v1.py" "$EXTRAS_DIR/ace_protocol_v2.py" "$EXTRAS_DIR/filament_feed_ace.py" "$EXTRAS_DIR/filament_switch_sensor_ace.py"
+# Background-swap module (EXPERIMENTAL): inert without its config section
+# ([ace_bg_swap]) - always shipped so opting in is a config-only step and a
+# stale copy can never shadow a new ace.py.
+cp "$INSTALL_DIR/klipper/extras/ace_bg_swap.py" "$EXTRAS_DIR/ace_bg_swap.py"
+# Per-material tip-forming tables ([ace_tipform] section, inert on 'stock')
+cp "$INSTALL_DIR/klipper/extras/ace_tipform.py" "$EXTRAS_DIR/ace_tipform.py"
+chmod 644 "$EXTRAS_DIR/ace.py" "$EXTRAS_DIR/ace_protocol.py" "$EXTRAS_DIR/ace_protocol_v1.py" "$EXTRAS_DIR/ace_protocol_v2.py" "$EXTRAS_DIR/filament_feed_ace.py" "$EXTRAS_DIR/filament_switch_sensor_ace.py" "$EXTRAS_DIR/ace_bg_swap.py" "$EXTRAS_DIR/ace_tipform.py"
 log "  Klipper extras installed"
 cp "$INSTALL_DIR/klipper/kinematics/extruder_ace.py" "$KINEMATICS_DIR/extruder_ace.py"
 chmod 644 "$KINEMATICS_DIR/extruder_ace.py"
 log "  Klipper kinematics installed"
-# Multi-MCU homing trsync window. Stock paxx sets TRSYNC_TIMEOUT=0.050; the
+# Multi-MCU homing trsync window. Stock 1.4.1 sets TRSYNC_TIMEOUT=0.050; the
 # eddy-current bed probe intermittently exceeds it on a toolhead MCU and trips
-# "Communication timeout during homing" (0003-0528, index:3). The 0.250
-# mitigation (= Klipper's own single-MCU value) masks it. The standalone
-# web-head daemon (S98multiace-web) reduces but does not eliminate the 0003
-# (web-preflight bedmesh still trips it), so the mitigation is re-armed here.
-# The root cause - klippy code-page eviction on overlay/SSH installs during
-# the multi-MCU homing-probe window - is tracked separately.
+# "Communication timeout during homing" (0003-0528, index:3). We raise it to
+# 0.350 (stock 1.5's own default) to mask it. The standalone web-head daemon
+# (S98multiace-web) reduces but does not eliminate the 0003 (web-preflight
+# bedmesh still trips it), so the mitigation is re-armed here. The root cause -
+# klippy code-page eviction on overlay/SSH installs during the multi-MCU
+# homing-probe window - is tracked separately.
 #
-# TESTING: set to "0.050" to leave stock untouched and observe the real 0003
-# signal. To re-arm the mitigation, change this ONE value back to "0.250".
-TRSYNC_VALUE="0.250"
+# ONLY-RAISE: stock 1.5 already ships 0.350 (and a future stock may go higher);
+# never pull the window back DOWN. Patch only when the live value is LOWER than
+# our floor (e.g. 1.4.1's 0.050).
+# TESTING: set TRSYNC_VALUE to "0.050" to observe the real 0003 signal.
+TRSYNC_VALUE="0.350"
 MCU_PY="${HOME_DIR}/klipper/klippy/mcu.py"
-if [ -f "$MCU_PY" ] && grep -qE '^TRSYNC_TIMEOUT = ' "$MCU_PY" \
-        && ! grep -qE "^TRSYNC_TIMEOUT = ${TRSYNC_VALUE}\$" "$MCU_PY"; then
-    [ -f "${MCU_PY}.pre_multiace" ] || cp "$MCU_PY" "${MCU_PY}.pre_multiace" 2>/dev/null || true
-    sed -i -E "s/^TRSYNC_TIMEOUT = .*/TRSYNC_TIMEOUT = ${TRSYNC_VALUE}/" "$MCU_PY"
-    log "  TRSYNC_TIMEOUT armed to ${TRSYNC_VALUE} in mcu.py (backup: ${MCU_PY}.pre_multiace)"
+if [ -f "$MCU_PY" ] && grep -qE '^TRSYNC_TIMEOUT = ' "$MCU_PY"; then
+    TRSYNC_CUR="$(grep -oE '^TRSYNC_TIMEOUT = [0-9.]+' "$MCU_PY" | awk '{print $3}')"
+    if [ -n "$TRSYNC_CUR" ] && awk "BEGIN{exit !($TRSYNC_CUR < $TRSYNC_VALUE)}"; then
+        [ -f "${MCU_PY}.pre_multiace" ] || cp "$MCU_PY" "${MCU_PY}.pre_multiace" 2>/dev/null || true
+        sed -i -E "s/^TRSYNC_TIMEOUT = .*/TRSYNC_TIMEOUT = ${TRSYNC_VALUE}/" "$MCU_PY"
+        log "  TRSYNC_TIMEOUT raised ${TRSYNC_CUR} -> ${TRSYNC_VALUE} in mcu.py (backup: ${MCU_PY}.pre_multiace)"
+    else
+        log "  TRSYNC_TIMEOUT already >= ${TRSYNC_VALUE} (${TRSYNC_CUR}) - leaving stock untouched"
+    fi
+fi
+# Same 0003/"Timer too close" family as the trsync raise above: pre-warm the
+# klipper page cache at every boot so the homing/probe window never takes a
+# cold page fault (see the script header for details). Needs root for
+# /etc/init.d; a lava-context web update skips it with a note (the previously
+# installed copy keeps running). Also run it ONCE right now so the current
+# session is warmed without a reboot.
+if [ -f "$INSTALL_DIR/deploy/S59multiace-prewarm" ]; then
+    if [ "$IS_ROOT" = "1" ]; then
+        cp "$INSTALL_DIR/deploy/S59multiace-prewarm" /etc/init.d/S59multiace-prewarm
+        sed -i 's/\r$//' /etc/init.d/S59multiace-prewarm
+        chmod 0755 /etc/init.d/S59multiace-prewarm
+        log "  Installed init script: /etc/init.d/S59multiace-prewarm (klipper page-cache prewarm)"
+        /etc/init.d/S59multiace-prewarm start >>"$LOGFILE" 2>&1 || true
+    else
+        log "  SKIP: S59multiace-prewarm install needs root (existing copy stays active)"
+    fi
 fi
 NEW_CFG="$INSTALL_DIR/config/extended/ace.cfg"
 ACTIVE_CFG="$CONFIG_DIR/ace.cfg"
@@ -176,22 +187,6 @@ else
     cp "$NEW_CFG" "$ACTIVE_CFG"
     chmod 644 "$ACTIVE_CFG"
     log "  ace.cfg installed"
-fi
-# MakerDad 1.6 migration: old swap settings leave the nozzle physically
-# short of filament after ACE_SWAP_HEAD.  Apply the validated 100 mm extra
-# flush and zero post-load retract on normal installs.  --keep-config remains
-# an explicit opt-out for owners who deliberately tune these two values.
-if [ "$KEEP_CONFIG" -eq 0 ]; then
-    sed -i -E 's/^swap_purge_length:.*/swap_purge_length: 100/' "$ACTIVE_CFG"
-    sed -i -E 's/^swap_anti_ooze_retract:.*/swap_anti_ooze_retract: 0/' "$ACTIVE_CFG"
-    log "  Applied 1.6 colour-swap migration: flush=100 mm, retract=0 mm"
-
-    # MakerDad 3.0 migration: retain six 1mm / 6s grinding steps per cycle.
-    sed -i -E 's/^load_hall_grind_cycles:.*/load_hall_grind_cycles: 3/' "$ACTIVE_CFG"
-    sed -i -E 's/^load_hall_grind_distance:.*/load_hall_grind_distance: 6/' "$ACTIVE_CFG"
-    sed -i -E 's/^load_hall_step_distance:.*/load_hall_step_distance: 1/' "$ACTIVE_CFG"
-    sed -i -E 's/^load_hall_grind_time:.*/load_hall_grind_time: 6/' "$ACTIVE_CFG"
-    log "  Applied 3.0 grinding migration: 3 cycles, 6x1 mm, 6 s/step"
 fi
 mkdir -p "$MULTIACE_DIR"
 cp "$INSTALL_DIR/config/extended/multiace/ace_mode_switch.sh" "$MULTIACE_DIR/ace_mode_switch.sh"
@@ -415,21 +410,6 @@ if [ "$INSTALL_WEB" = "1" ]; then
         log "ERROR: $WEB_SRC not found - multiace/web/ missing in install bundle"
         exit 1
     fi
-    # A previous version can leave old JavaScript or Python modules in this
-    # directory.  Replacing individual files is insufficient: a browser may
-    # get a new index.html that refers to stale assets, and Python may import
-    # a stale module.  The persistent user data is under printer_data/config,
-    # not under WEB_DEST, so replacing this deployment tree is safe.
-    if [ -d "$WEB_DEST" ]; then
-        if [ "$IS_ROOT" = "1" ] && [ -x "$INITD_SCRIPT" ]; then
-            "$INITD_SCRIPT" stop >>"$LOGFILE" 2>&1 || true
-        fi
-        pkill -TERM -f 'uvicorn main:app.*--port 7126' 2>/dev/null || true
-        sleep 1
-        pkill -KILL -f 'uvicorn main:app.*--port 7126' 2>/dev/null || true
-        rm -rf "$WEB_DEST"
-        log "  Removed previous Web deployment to prevent stale UI assets"
-    fi
     mkdir -p "$WEB_DEST/backend" "$WEB_DEST/frontend" "$WEB_DEST/i18n"
     cp -a "$WEB_SRC/backend/."  "$WEB_DEST/backend/"
     cp -a "$WEB_SRC/frontend/." "$WEB_DEST/frontend/"
@@ -444,34 +424,6 @@ if [ "$INSTALL_WEB" = "1" ]; then
     find "$WEB_DEST/backend/__pycache__" -type f -delete 2>/dev/null || true
     chown -R lava:lava "$WEB_DEST" 2>/dev/null || true
     log "  Copied web/ to $WEB_DEST (incl. i18n catalogs)"
-    WEB_VERIFY_FAILED=0
-    for f in \
-        "backend/main.py" \
-        "backend/preflight_core.py" \
-        "frontend/index.html" \
-        "frontend/app.js" \
-        "frontend/preflight_pyodide_worker.js" \
-        "frontend/style.css"
-    do
-        if cmp -s "$WEB_SRC/$f" "$WEB_DEST/$f"; then
-            log "  OK:   Web $f"
-        else
-            log "  FAIL: Web $f did not copy correctly"
-            WEB_VERIFY_FAILED=1
-        fi
-    done
-    if ! grep -q 'startAutoDry' "$WEB_DEST/frontend/app.js" \
-       || ! grep -q 'slot-mileage' "$WEB_DEST/frontend/index.html" \
-       || ! grep -q 'ACE_AUTO_DRY_SET' "$EXTRAS_DIR/ace.py"; then
-        log "  FAIL: auto-dry or mileage feature signature is missing"
-        WEB_VERIFY_FAILED=1
-    else
-        log "  OK:   auto-dry and mileage feature signatures"
-    fi
-    if [ "$WEB_VERIFY_FAILED" = "1" ]; then
-        log "ERROR: Web installation verification failed"
-        exit 1
-    fi
     if run_as_lava "command -v pip3 >/dev/null" 2>/dev/null; then
         log "  Installing Python deps (fastapi, uvicorn, httpx) for user lava ..."
         run_as_lava "pip3 install --user --upgrade -r '$WEB_DEST/backend/requirements.txt'" \

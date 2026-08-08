@@ -16,13 +16,13 @@ from .ace_protocol_v2 import AceProtocolV2
 
 KNOWN_PROTOCOLS = (AceProtocolV1, AceProtocolV2)
 
-MULTIACE_VERSION = "v0.98.1B-MakerDad4.6"
+MULTIACE_VERSION = "v0.99.6.2b-md1.0"
 MULTIACE_CODENAME = "Persistent Pesterers"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = ""
-MULTIACE_BUNDLE_SHA1 = "1f491ef"
+MULTIACE_BUILD_TAG = "md1.0"
+MULTIACE_BUNDLE_SHA1 = "9900764"
 
 def _load_i18n_catalog(i18n_dir, lang):
     """Read <i18n_dir>/<lang>.json overlaid on en.json. Returns a dict
@@ -79,15 +79,59 @@ GATE_AVAILABLE = 1
 V2_FEED_LOG = False
 V2_FEED_LOG_INTERVAL = 2.0
 
+REACTOR_WATCHDOG_INTERVAL = 0.1
+REACTOR_STALL_THRESHOLD = 0.030
+AIRLOG_SAMPLE_S = 2.0
+AIRLOG_EMIT_S = 10.0
+STALL_SRC_THRESHOLD = 0.020
+
 V2_FA_RUNNING_STATES = (
     'assisting', 'rollback_assisting', 'feeding', 'rollback', 'preloading')
-V2_FA_PRINT_ASSIST_STATES = ('assisting',)
+
+V2_ACTIVE_MOTION_STATES = ('feeding', 'rollback', 'rollback_assisting', 'preloading')
+WAIT_ACE_FEEDING_MAX = 4
 
 FA_HOMING_SETTLE = 0.5
 
 ACE_OPEN_TIMEOUT = 8.0
+V2_HANDSHAKE_TIMEOUT = 4.0
+V2_HANDSHAKE_RETRY_DELAYS = (5.0, 15.0)
 
 FA_ASSIST_VERIFY_MARGIN = 1.5
+
+FA_EXTRUDE_IDLE_GRACE = 2.0
+
+PICK_CHECK_FLOW_PUSH = 10.
+PICK_CHECK_PUSH_FEEDRATE = 400
+PICK_CHECK_COIL_SAMPLES = 5
+PICK_CHECK_COIL_INTERVAL = 0.5
+PICK_CHECK_COIL_THRESHOLD = 1000
+PICK_CHECK_MIN_PUSH = 20.
+PICK_GATE_REGRIP = 40.
+PICK_GATE_REGRIP_FEEDRATE = 300
+PICK_GATE_ACE_PUSH_V2 = 40.
+PICK_GATE_ACE_PUSH_V1 = 30.
+PICK_GATE_ACE_PUSH_SPEED = 20
+PICK_GATE_ACE_PUSH_RETRIES = 3
+PICK_GATE_ACE_PUSH_RETRY_DELAY = 1.0
+PICK_TURBULENCE_UPSWING = 3000.
+PICK_TURBULENCE_SETTLE = 2.0
+BG_PICK_WIPE = True
+RESUME_NOOP_WIPE_WINDOW = 180.
+
+# A head can report an empty ACE channel before the physical inlet sensor has
+# settled.  Keep the mapping until both sensors agree for a short interval.
+HEAD_MAPPING_MONITOR_INTERVAL = 0.5
+HEAD_MAPPING_EMPTY_SETTLE = 0.8
+
+FA_REARM_MAX_FAILS = 5
+FA_STICK_CONFIRM_TIME = 8.0
+
+HEAL_MAX_FAILS = 3
+FORCE_OFFICIAL_MAX = 3
+
+V1_FA_CONFIRM_TICKS = 2
+V1_FA_REARM_MIN_INTERVAL = 10.0
 
 class MultiAce:
     VARS_ACE_REVISION = 'ace__revision'
@@ -95,6 +139,8 @@ class MultiAce:
     VARS_ACE_HEAD_SOURCE = 'ace__head_source'
     VARS_ACE_HEAD_MANUAL = 'ace__head_manual'
     VARS_ACE_HEAD = 'ace__ace_head'
+    VARS_ACE_HEAD_FEEDER = 'ace__head_feeder'
+    VARS_ACE_HEAD_ACE = 'ace__head_ace'
     VARS_V2_AUTO_DRY_ARMED = 'ace__v2_auto_dry_armed'
 
     def __init__(self, config):
@@ -150,26 +196,8 @@ class MultiAce:
         self.load_length = config.getint('load_length', 2000)         
         self.load_retry = config.getint('load_retry', 3)              
         self.load_retry_retract = config.getint('load_retry_retract', 50)  
-        self.load_hall_retract_step = config.getint(
-            'load_hall_retract_step', 5, minval=1, maxval=20)
-        self.load_hall_retract_max = config.getint(
-            'load_hall_retract_max', 100, minval=20, maxval=300)
-        self.load_hall_grind_cycles = config.getint(
-            'load_hall_grind_cycles', 3, minval=1, maxval=10)
-        self.load_hall_grind_distance = config.getfloat(
-            'load_hall_grind_distance', 6.0, minval=1.0, maxval=20.0)
-        self.load_hall_step_distance = config.getfloat(
-            'load_hall_step_distance', 1.0, minval=0.25, maxval=1.0)
-        self.load_hall_grind_time = config.getfloat(
-            'load_hall_grind_time', 6.0, minval=0.5, maxval=15.0)
-        self.load_hall_grind_speed = config.getint(
-            'load_hall_grind_speed', 1200, minval=200, maxval=1800)
-        self.load_flush_baseline_timeout = config.getfloat(
-            'load_flush_baseline_timeout', 5.0, minval=1.0, maxval=15.0)
         self.max_dryer_temperature = config.getint('max_dryer_temperature', 55)
-
         self.extra_purge_length = config.getfloat('extra_purge_length', 0, minval=0, maxval=200)
-
         self.swap_purge_length = config.getint('swap_purge_length', 0, minval=0, maxval=200)
 
         self.seat_overshoot_length = config.getint('seat_overshoot_length', 0, minval=0, maxval=100)
@@ -177,7 +205,7 @@ class MultiAce:
 
         self.swap_retract_length = config.getint('swap_retract_length', 0, minval=0, maxval=2000)
 
-        self.swap_anti_ooze_retract = config.getint('swap_anti_ooze_retract', 0, minval=0, maxval=50)
+        self.swap_anti_ooze_retract = config.getint('swap_anti_ooze_retract', 10, minval=0, maxval=50)
 
         self.swap_post_retract_wipe = config.getboolean(
             'swap_post_retract_wipe', False)
@@ -195,14 +223,68 @@ class MultiAce:
 
         config.getint('extrusion_stock_retry', 5, minval=1, maxval=50)
         self.unload_retry = config.getint('unload_retry', 3, minval=1, maxval=10)
+        # The Web configuration page exposes this option. Accept it on builds
+        # that do not schedule post-print unloading so it cannot block Klipper
+        # configuration loading after a Web save.
         self.unload_all_after_print = config.getboolean(
             'unload_all_after_print', False)
+        self.unload_gpio = config.getboolean('unload_gpio', True)
 
         self.swap_cool_probe = config.getboolean('swap_cool_probe', True)
         self.swap_probe_temp = config.getint('swap_probe_temp', 175, minval=170, maxval=250)
         self.swap_probe_push = config.getint('swap_probe_push', 5, minval=1, maxval=20)
         self.dryer_temp = config.getint('dryer_temp', 55, minval=30, maxval=70)
         self.dryer_duration = config.getint('dryer_duration', 240, minval=10, maxval=480)
+        self._v2_print_block_temp = config.getfloat(
+            'v2_print_block_temp', 40.0, minval=30.0, maxval=80.0)
+        # Keep auto-dry humidity decisions responsive even when an older
+        # installed config still contains the former 60-second interval.
+        configured_auto_interval = config.getfloat(
+            'v2_auto_dry_check_interval', 5.0, minval=2.0, maxval=600.0)
+        self._v2_auto_dry_check_interval = min(configured_auto_interval, 5.0)
+        self._v2_dry_exhaust_open_delay = config.getfloat(
+            'v2_dry_exhaust_open_delay', 10.0, minval=0.0, maxval=9999.0)
+        self._v2_auto_dry_default_start_humidity = config.getfloat(
+            'v2_auto_dry_start_humidity', 35.0, minval=5.0, maxval=95.0)
+        self._v2_auto_dry_default_stop_humidity = config.getfloat(
+            'v2_auto_dry_stop_humidity', 25.0, minval=1.0, maxval=90.0)
+        self._v2_auto_dry_default_temp = config.getint(
+            'v2_auto_dry_temp', self.dryer_temp, minval=30, maxval=70)
+        self._v2_auto_dry_default_duration = config.getint(
+            'v2_auto_dry_duration', 480, minval=10, maxval=480)
+        if (self._v2_auto_dry_default_stop_humidity
+                >= self._v2_auto_dry_default_start_humidity):
+            raise config.error('v2_auto_dry_stop_humidity must be lower than v2_auto_dry_start_humidity')
+        self._v2_auto_dry_enabled = {}
+        self._v2_auto_dry_start_humidity = {}
+        self._v2_auto_dry_stop_humidity = {}
+        self._v2_auto_dry_temp = {}
+        self._v2_auto_dry_duration = {}
+        saved_auto_dry_mask = None
+        if self.save_variables:
+            try:
+                raw_armed = self.save_variables.allVariables.get(self.VARS_V2_AUTO_DRY_ARMED, None)
+                if raw_armed is not None:
+                    saved_auto_dry_mask = int(raw_armed)
+            except (TypeError, ValueError):
+                pass
+        for i in range(8):
+            configured_enabled = config.getboolean('v2_auto_dry_enabled_%d' % i, False)
+            self._v2_auto_dry_enabled[i] = (configured_enabled if saved_auto_dry_mask is None
+                                            else bool(saved_auto_dry_mask & (1 << i)))
+            self._v2_auto_dry_start_humidity[i] = config.getfloat(
+                'v2_auto_dry_start_humidity_%d' % i,
+                self._v2_auto_dry_default_start_humidity, minval=5.0, maxval=95.0)
+            self._v2_auto_dry_stop_humidity[i] = config.getfloat(
+                'v2_auto_dry_stop_humidity_%d' % i,
+                self._v2_auto_dry_default_stop_humidity, minval=1.0, maxval=90.0)
+            if self._v2_auto_dry_stop_humidity[i] >= self._v2_auto_dry_start_humidity[i]:
+                raise config.error('v2 auto dry stop humidity must be lower than start humidity')
+            self._v2_auto_dry_temp[i] = config.getint(
+                'v2_auto_dry_temp_%d' % i, self._v2_auto_dry_default_temp, minval=30, maxval=70)
+            self._v2_auto_dry_duration[i] = config.getint(
+                'v2_auto_dry_duration_%d' % i, self._v2_auto_dry_default_duration,
+                minval=10, maxval=480)
 
         self.head_feed_length = {}
         self.head_load_length = {}
@@ -232,6 +314,15 @@ class MultiAce:
                 except (TypeError, ValueError):
                     pass
 
+        self.head_feeder = {}
+        for i in range(4):
+            self.head_feeder[i] = config.getboolean('head_feeder_%d' % i, False)
+
+        self.head_ace = {}
+        for i in range(4):
+            self.head_ace[i] = config.getint(
+                'head_ace_%d' % i, i, minval=0, maxval=3)
+
         self._ace_section_load_length = {}
         self._ace_section_load_length_slot = {}
         self._ace_section_retract_length = {}
@@ -252,7 +343,6 @@ class MultiAce:
             rl = ace_sec.getint('retract_length', None, minval=1)
             if rl is not None:
                 self._ace_section_retract_length[ace_i] = rl
-
             srl = ace_sec.getint('swap_retract_length', None, minval=0, maxval=2000)
             if srl is not None:
                 self._ace_section_swap_retract_length[ace_i] = srl
@@ -292,6 +382,14 @@ class MultiAce:
         self._fa_print_disable = _parse_idx_list('fa_print_disable')
         self._fa_load_disable = _parse_idx_list('fa_load_disable')
         self.fa_debug = config.getboolean('fa_debug', False)
+        self.v1_fa_monitor = config.getboolean('v1_fa_monitor', False)
+        _cfg_pickup_clean = config.getboolean('pickup_cleaning', False)
+        self._pickup_cleaning = _cfg_pickup_clean
+        if self.save_variables:
+            _sv = self.save_variables.allVariables.get(
+                'ace__pickup_cleaning', None)
+            if _sv is not None:
+                self._pickup_cleaning = bool(_sv)
 
         self._homing_flag_path = config.get(
             'homing_flag_path', '/tmp/multiace_homing_active')
@@ -314,10 +412,8 @@ class MultiAce:
             'v2_print_assist_mode',
             {'constant': 'constant', 'tracked': 'tracked'},
             'constant')
-
         self._v2_constant_assist_speed = config.getint(
             'v2_constant_assist_speed', 0, minval=0, maxval=50)
-
         self._v2_assist_confirm_time = config.getfloat(
             'v2_assist_confirm_time', 0.5, minval=0.0, maxval=5.0)
 
@@ -332,7 +428,6 @@ class MultiAce:
         self._serials = {}
         self._connected_per_ace = {}
         self._serial_failed_per_ace = {}
-
         self._reconnecting_per_ace = {}
         self._info_per_ace = {}
 
@@ -342,16 +437,24 @@ class MultiAce:
         self._slot_overrides_mtime = 0.0
 
         self._orig_set_ptc = None
+        self._raw_set_ptc = None
         self._expected_ptc_pushes = []
 
         self._in_internal_load_head = False
         self._feed_assist_per_ace = {}
+        self._v1_fa_notassist_streak = {}
+        self._v1_fa_last_rearm = {}
         self._callback_maps = {}
         self._request_ids = {}
         self._read_buffers = {}
         self._ace_dev_fds = {}
         self._heartbeat_timers = {}
         self._connect_timers_per_ace = {}
+        self._v2_handshake_timers = {}
+        self._v2_retry_timers = {}
+        self._v2_handshake_attempts = {}
+        self._v2_last_rx_per_ace = {}
+        self._v2_fault_per_ace = {}
 
         self._writer_threads = {}
         self._reader_threads = {}
@@ -368,6 +471,8 @@ class MultiAce:
         self._v2_velocity_timers = {}
         self._v2_velocity_state = {}
         self._v2_fa_rearm_pending = set()
+        self._fa_rearm_fails = {}
+        self._fa_rearm_suspended = set()
         self._fa_intent_ts = {}
 
         self._v2_feed_check_check_length = config.getint(
@@ -381,101 +486,15 @@ class MultiAce:
                     self._v2_feed_check_error_length,
                     self._v2_feed_check_check_length))
 
-        self._v2_feed_watchdog_enabled = config.getboolean(
-            'v2_feed_watchdog', True)
-        self._v2_feed_watchdog_interval = config.getfloat(
-            'v2_feed_watchdog_interval', 0.5, minval=0.25, maxval=10.0)
-        self._v2_feed_watchdog_min_extrude = config.getfloat(
-            'v2_feed_watchdog_min_extrude', 0.8, minval=0.2, maxval=50.0)
-        self._v2_feed_watchdog_max_stalls = config.getint(
-            'v2_feed_watchdog_max_stalls', 1, minval=1, maxval=10)
-        self._v2_feed_watchdog_cooldown = config.getfloat(
-            'v2_feed_watchdog_cooldown', 4.0, minval=0.5, maxval=60.0)
-        self._v2_feed_watchdog_pause_after = config.getint(
-            'v2_feed_watchdog_pause_after', 1, minval=0, maxval=20)
-        self._v2_feed_watchdog_after_buffer_only = config.getboolean(
-            'v2_feed_watchdog_after_buffer_only', True)
-        self._v2_feed_watchdog_assist_grace = config.getfloat(
-            'v2_feed_watchdog_assist_grace', 0.75, minval=0.0, maxval=5.0)
-        self._v2_feed_watchdog_buffer_slack = config.getfloat(
-            'v2_feed_watchdog_buffer_slack', 3.0, minval=0.0, maxval=50.0)
-        self._v2_feed_watchdog_start_grace = config.getfloat(
-            'v2_feed_watchdog_start_grace', 20.0, minval=0.0, maxval=120.0)
-        self._v2_feed_watchdog_rearm_grace = config.getfloat(
-            'v2_feed_watchdog_rearm_grace', 4.0, minval=0.5, maxval=30.0)
-        self._v2_feed_watchdog_no_baseline_grace = config.getfloat(
-            'v2_feed_watchdog_no_baseline_grace', 6.0, minval=1.0, maxval=60.0)
-        self._v2_feed_watchdog_no_baseline_extrude = config.getfloat(
-            'v2_feed_watchdog_no_baseline_extrude', 8.0, minval=1.0,
-            maxval=100.0)
-        self._v2_feed_watchdog_retract_grace = config.getfloat(
-            'v2_feed_watchdog_retract_grace', 2.0, minval=0.0,
-            maxval=30.0)
-        self._v2_feed_watchdog_outer_hold = config.getfloat(
-            'v2_feed_watchdog_outer_hold', 1.2, minval=0.0,
-            maxval=30.0)
-        self._v2_toolhead_jam_watchdog = config.getboolean(
-            'v2_toolhead_jam_watchdog', True)
-        self._v2_toolhead_jam_skip = config.getfloat(
-            'v2_toolhead_jam_skip', 20.0, minval=0.0, maxval=200.0)
-        self._v2_toolhead_jam_min_extrude = config.getfloat(
-            'v2_toolhead_jam_min_extrude', 12.0, minval=1.0, maxval=200.0)
-        self._v2_toolhead_jam_grace = config.getfloat(
-            'v2_toolhead_jam_grace', 6.0, minval=0.5, maxval=60.0)
-
-        self._v2_print_block_temp = config.getfloat(
-            'v2_print_block_temp', 40.0, minval=30.0, maxval=80.0)
-        self._v2_auto_dry_check_interval = config.getfloat(
-            'v2_auto_dry_check_interval', 60.0, minval=10.0, maxval=600.0)
-        self._v2_auto_dry_default_start_humidity = config.getfloat(
-            'v2_auto_dry_start_humidity', 35.0, minval=5.0, maxval=95.0)
-        self._v2_auto_dry_default_stop_humidity = config.getfloat(
-            'v2_auto_dry_stop_humidity', 25.0, minval=1.0, maxval=90.0)
-        self._v2_auto_dry_default_temp = config.getint(
-            'v2_auto_dry_temp', self.dryer_temp, minval=30, maxval=70)
-        self._v2_auto_dry_default_duration = config.getint(
-            'v2_auto_dry_duration', 480, minval=10, maxval=480)
-        self._v2_auto_dry_enabled = {}
-        self._v2_auto_dry_start_humidity = {}
-        self._v2_auto_dry_stop_humidity = {}
-        self._v2_auto_dry_temp = {}
-        self._v2_auto_dry_duration = {}
-        saved_auto_dry_mask = None
-        if self.save_variables:
-            raw_armed = self.save_variables.allVariables.get(
-                self.VARS_V2_AUTO_DRY_ARMED, None)
-            try:
-                if raw_armed is not None:
-                    saved_auto_dry_mask = int(raw_armed)
-            except (TypeError, ValueError):
-                saved_auto_dry_mask = None
-        for i in range(8):
-            configured_enabled = config.getboolean(
-                'v2_auto_dry_enabled_%d' % i, False)
-            self._v2_auto_dry_enabled[i] = (
-                configured_enabled if saved_auto_dry_mask is None
-                else bool(saved_auto_dry_mask & (1 << i)))
-            self._v2_auto_dry_start_humidity[i] = config.getfloat(
-                'v2_auto_dry_start_humidity_%d' % i,
-                self._v2_auto_dry_default_start_humidity,
-                minval=5.0, maxval=95.0)
-            self._v2_auto_dry_stop_humidity[i] = config.getfloat(
-                'v2_auto_dry_stop_humidity_%d' % i,
-                self._v2_auto_dry_default_stop_humidity,
-                minval=1.0, maxval=90.0)
-            self._v2_auto_dry_temp[i] = config.getint(
-                'v2_auto_dry_temp_%d' % i,
-                self._v2_auto_dry_default_temp, minval=30, maxval=70)
-            self._v2_auto_dry_duration[i] = config.getint(
-                'v2_auto_dry_duration_%d' % i,
-                self._v2_auto_dry_default_duration, minval=10, maxval=480)
-
         self._enable_web = config.getboolean('enable_web', True)
         self._web_port = config.getint(
             'web_port', 7126, minval=1024, maxval=65535)
         self._web_dir = config.get(
             'web_dir', '/home/lava/multiace_web')
 
+        self._identity_priority = config.get('identity_priority', 'multiace')
+        if self._identity_priority not in ('multiace', 'spoollink'):
+            self._identity_priority = 'multiace'
         config_lang = config.get('language', 'en')
         lang = None
         if self.save_variables:
@@ -489,15 +508,15 @@ class MultiAce:
         self._reload_i18n_catalog()
 
         self._head_source = {0: None, 1: None, 2: None, 3: None}
-
         self._heal_official_skip = {}
+        self._heal_fail_count = {}
+        self._ptc_push_block = {}
+        self._force_official_count = {}
 
         self._swap_in_progress = False
-
         self._swap_saved_pos = None
         self._swap_orig_ext_name = None
         self._swap_switched_head = False
-
         self._swap_probe_ref_temp = 0
 
         self._swap_phase = 'idle'
@@ -507,28 +526,39 @@ class MultiAce:
         self._v2_active_rev_assist = False
         self._test_cancel = False
         self._auto_feed_enabled = False
+        self._fa_context = 'idle'
+        self._flow_calibrating = False
+        # Track a real print job separately from print_stats stop events so
+        # post-print unloading cannot run for a cancel/error or twice for one
+        # completed job.
         self._print_job_active = False
         self._print_end_unload_pending = False
-        self._fa_context = 'idle'
+        self._resume_reopen_pending = set()
 
         self._homing_active = False
         self._last_homing_end = 0.0
 
         self._retract_length_override = None
-
         self._purge_length_override = None
 
         self._last_unload_ok = True
         self._last_load_ok = True
 
         self._runout_suppress_heads = set()
+        self._print_has_gcode_loads = False
 
         self._ghost_heads = set()
+        self._bg_left_empty = set()
+        self._bg_staged = {}
+        self._bg_load_unverified = set()
+        self._resume_wipe_deadline = 0.
+        self._bg_prime_deficit = {}
         self._hotplug_gone = {}
 
         self._serial_failed = False
         self._serial_failed_at = 0.0
         self._serial_failed_pause_sent = False
+        self._fa_failed_pause_sent = False
 
         log_dir = config.get('log_dir', '/home/lava/printer_data/logs')
         self._usb_log = _setup_file_logger(
@@ -541,37 +571,41 @@ class MultiAce:
             'multiace_wiggle', os.path.join(log_dir, 'multiace_wiggle.log'))
         self._fa_log = _setup_file_logger(
             'multiace_fa', os.path.join(log_dir, 'multiace_fa.log'))
-
         self._feedlog = _setup_file_logger(
             'multiace_feedlog', os.path.join(log_dir, 'multiace_feedlog.log'))
         self._feedlog_last = {}
         self._feedlog_timer = None
-        self._v2_feed_info_per_ace = {}
-        self._v2_mileage_windows = {}
-        self._v2_key_state_per_ace = {}
-        self._v2_slot_status_since = {}
-        self._feed_watchdog_last = {}
-        self._feed_watchdog_bad = {}
-        self._feed_watchdog_rearms = {}
-        self._feed_watchdog_rearm_pending = {}
-        self._feed_watchdog_assist_origin = {}
-        self._feed_watchdog_outer_since = {}
-        self._feed_watchdog_print_start_ts = 0.0
-        self._feed_watchdog_seen_mileage = set()
-        self._feed_watchdog_soft_warned = set()
-        self._feed_watchdog_no_baseline = {}
-        self._feed_watchdog_paused = set()
-        self._toolhead_jam_watchdog = {}
-        self._toolhead_jam_paused = set()
-        self._feed_watchdog_timer = None
         self._v2_auto_dry_timer = None
         self._v2_auto_dry_active = set()
-        self._v2_cooldown_resume_timer = None
-        self._v2_cooldown_resume_active = False
+        self._v2_dry_lifecycle_timer = None
+        # ACE2 does not report valve position in its status packet. Track
+        # successful Web/UI requests locally so the exhaust controls remain
+        # truthful for this Klipper session.
+        self._v2_exhaust_open = {}
+        self._v2_exhaust_pending = {}
+        self._v2_fan_running = {}
+        self._v2_dry_hardware_seen = {}
+        # V2 status reports can lag a successful manual drying command by
+        # several heartbeat intervals.  Keep a bounded local record so the
+        # print-temperature guard can still stop that dryer immediately.
+        self._v2_manual_dry_active = {}
+        # Drying tasks stopped only because a print is too hot are restored
+        # after that print ends. Values retain the original task parameters.
+        self._v2_dry_paused_by_print = {}
+        self._v2_print_start_temp_block = False
+        self._v2_print_start_resume_timer = None
+        # A print-start over-temperature gate owns at most one PAUSE.  This
+        # prevents its polling timer from interrupting RESUME/G28 drip moves.
+        self._v2_print_temp_pause_requested = False
+        self._v2_print_temp_pause_owned = False
+        self._v2_print_temp_user_override = False
         self._v2_print_guard_timer = None
-        self._v2_print_guard_paused = False
+        self._head_mapping_monitor_timer = None
+        self._head_mapping_empty_since = {}
         self._state_debug_enabled = config.getboolean('state_debug', False)
         self._usb_debug_enabled = config.getboolean('usb_debug', True)
+        self.airlog_enable = config.getboolean('airlog', False)
+        self.stall_watchdog = config.getboolean('stall_watchdog', False)
 
         self._apply_log_levels()
         self._last_switch_auto_ts = None
@@ -583,9 +617,9 @@ class MultiAce:
         self._fa_settle_after_stop = config.getfloat(
             'fa_settle_after_stop', 2.0, minval=0.0, maxval=10.0)
         self._fa_start_retries = config.getint(
-            'fa_start_retries', 5, minval=0, maxval=30)
+            'fa_start_retries', 15, minval=0, maxval=30)
         self._fa_start_retry_delay = config.getfloat(
-            'fa_start_retry_delay', 0.5, minval=0.05, maxval=5.0)
+            'fa_start_retry_delay', 1.0, minval=0.05, maxval=5.0)
 
         self._usb_stats = {
             'scans': 0,
@@ -662,6 +696,12 @@ class MultiAce:
         self.printer.register_event_handler(
             'print_stats:new_task_start', self._on_print_task_start)
         self.printer.register_event_handler('print_stats:stop', self._on_print_end)
+        self.printer.register_event_handler(
+            'flow_calibration:begin', self._on_flow_calibration_begin)
+        self.printer.register_event_handler(
+            'flow_calibration:end', self._on_flow_calibration_end)
+        self.printer.register_event_handler(
+            'virtual_sdcard:reset_file', self._on_flow_calibration_end)
 
         self.printer.register_event_handler(
             'homing:homing_move_begin', self._on_homing_move_begin)
@@ -675,11 +715,20 @@ class MultiAce:
             'ACE_STOP_DRYING', self.cmd_ACE_STOP_DRYING,
             desc=self.cmd_ACE_STOP_DRYING_help)
         self.gcode.register_command(
+            'ACE_EXHAUST_SET', self.cmd_ACE_EXHAUST_SET,
+            desc=self.cmd_ACE_EXHAUST_SET_help)
+        self.gcode.register_command(
             'ACE_ENABLE_FEED_ASSIST', self.cmd_ACE_ENABLE_FEED_ASSIST,
             desc=self.cmd_ACE_ENABLE_FEED_ASSIST_help)
         self.gcode.register_command(
             'ACE_SET_HEAD_MANUAL', self.cmd_ACE_SET_HEAD_MANUAL,
             desc=self.cmd_ACE_SET_HEAD_MANUAL_help)
+        self.gcode.register_command(
+            'ACE_SET_HEAD_FEEDER', self.cmd_ACE_SET_HEAD_FEEDER,
+            desc=self.cmd_ACE_SET_HEAD_FEEDER_help)
+        self.gcode.register_command(
+            'ACE_SET_HEAD_ACE', self.cmd_ACE_SET_HEAD_ACE,
+            desc=self.cmd_ACE_SET_HEAD_ACE_help)
         self.gcode.register_command(
             'ACE_SET_PURGE', self.cmd_ACE_SET_PURGE,
             desc=self.cmd_ACE_SET_PURGE_help)
@@ -687,18 +736,11 @@ class MultiAce:
             'ACE_DISABLE_FEED_ASSIST', self.cmd_ACE_DISABLE_FEED_ASSIST,
             desc=self.cmd_ACE_DISABLE_FEED_ASSIST_help)
         self.gcode.register_command(
-            'ACE_REARM_PRINT_ASSIST', self.cmd_ACE_REARM_PRINT_ASSIST,
-            desc=self.cmd_ACE_REARM_PRINT_ASSIST_help)
-        self.gcode.register_command(
             'ACE_FEED', self.cmd_ACE_FEED,
             desc=self.cmd_ACE_FEED_help)
         self.gcode.register_command(
             'ACE_RETRACT', self.cmd_ACE_RETRACT,
             desc=self.cmd_ACE_RETRACT_help)
-        self.gcode.register_command(
-            'ACE_TIP_RETRACT_SEGMENT',
-            self.cmd_ACE_TIP_RETRACT_SEGMENT,
-            desc=self.cmd_ACE_TIP_RETRACT_SEGMENT_help)
 
         self.gcode.register_command(
             'ACE_SWITCH', self.cmd_ACE_SWITCH,
@@ -735,6 +777,12 @@ class MultiAce:
             'ACE_CLEAR_HEADS', self.cmd_ACE_CLEAR_HEADS,
             desc=self.cmd_ACE_CLEAR_HEADS_help)
         self.gcode.register_command(
+            'ACE_REPAIR_HEAD_SOURCE', self.cmd_ACE_REPAIR_HEAD_SOURCE,
+            desc=self.cmd_ACE_REPAIR_HEAD_SOURCE_help)
+        self.gcode.register_command(
+            'ACE_BREAK_HEAD_SOURCE', self.cmd_ACE_BREAK_HEAD_SOURCE,
+            desc=self.cmd_ACE_BREAK_HEAD_SOURCE_help)
+        self.gcode.register_command(
             'ACE_UNLOAD_ALL_HEADS', self.cmd_ACE_UNLOAD_ALL_HEADS,
             desc=self.cmd_ACE_UNLOAD_ALL_HEADS_help)
         self.gcode.register_command(
@@ -755,6 +803,13 @@ class MultiAce:
         self.gcode.register_command(
             'ACE_AUTO_DRY_SET', self.cmd_ACE_AUTO_DRY_SET,
             desc=self.cmd_ACE_AUTO_DRY_SET_help)
+        self.gcode.register_command(
+            'ACE_PRINT_BLOCK_TEMP_SET', self.cmd_ACE_PRINT_BLOCK_TEMP_SET,
+            desc=self.cmd_ACE_PRINT_BLOCK_TEMP_SET_help)
+        self.gcode.register_command(
+            'ACE_UNLOAD_ALL_AFTER_PRINT_SET',
+            self.cmd_ACE_UNLOAD_ALL_AFTER_PRINT_SET,
+            desc=self.cmd_ACE_UNLOAD_ALL_AFTER_PRINT_SET_help)
         self.gcode.register_command(
             'ACE_USB_STATS', self.cmd_ACE_USB_STATS,
             desc=self.cmd_ACE_USB_STATS_help)
@@ -784,6 +839,14 @@ class MultiAce:
             'MULTIACE_SET_LANGUAGE',
             self.cmd_MULTIACE_SET_LANGUAGE,
             desc='[multiACE] Set message language (LANG=<code>), live reload + persist')
+        self.gcode.register_command(
+            'ACE_SET_PICKUP_CLEANING',
+            self.cmd_ACE_SET_PICKUP_CLEANING,
+            desc='[multiACE] Toggle Pickup-Cleaning (ENABLE=0|1), live + persist')
+        self.gcode.register_command(
+            'ACE_PICKUP_CLEAN',
+            self.cmd_ACE_PICKUP_CLEAN,
+            desc=self.cmd_ACE_PICKUP_CLEAN_help)
 
         for _name in (
                 'DISCOVER', 'INFO', 'STATUS', 'TEMP', 'FEEDINFO',
@@ -801,6 +864,27 @@ class MultiAce:
         scan = self._scan_ace_devices(context)
         self._ace_present = set(scan)
         if self._ace_canonical is not None:
+            for path in scan:
+                if path in self._ace_canonical:
+                    continue
+                new_idx = len(self._ace_canonical)
+                self._ace_canonical.append(path)
+                self._ace_devices = list(self._ace_canonical)
+                self.log_always(
+                    '[multiACE] Late ACE device %s -> index %d (missed the '
+                    'startup scan) - connecting' % (path, self._disp(new_idx)))
+                ok = False
+                try:
+                    ok = self._open_ace(new_idx)
+                except Exception as e:
+                    logging.info(
+                        '[multiACE] late-join connect error for ACE %d (%s): '
+                        '%s' % (new_idx, path, e))
+                if not ok:
+                    self._ace_canonical.pop()
+                    logging.info(
+                        '[multiACE] late-join connect failed for %s - will '
+                        'retry on the next scan' % path)
             self._ace_devices = list(self._ace_canonical)
         else:
             self._ace_devices = scan
@@ -835,7 +919,6 @@ class MultiAce:
         return (proto_bucket, len(port_tuple), port_tuple, path)
 
     def _parse_v2_extra_usb_ids(self, raw):
-
         pairs = []
         hexset = set('0123456789abcdef')
         for tok in (raw or '').replace(',', ' ').split():
@@ -1012,7 +1095,6 @@ class MultiAce:
                 s.close()
 
         def _evict(sig):
-
             for cmd in (['fuser', '-k', '-%s' % sig, port_spec],
                         ['pkill', '-%s' % sig, '-f', 'uvicorn.*main:app']):
                 try:
@@ -1131,7 +1213,6 @@ class MultiAce:
                          self._WEB_INITD)
             return
         if self._web_port_busy():
-
             if self._kill_own_klippy_web():
                 for _ in range(20):
                     if not self._web_port_busy():
@@ -1143,7 +1224,6 @@ class MultiAce:
                              self._web_port)
                 self.log_always(self._t('msg.web_running'))
                 return
-
         import subprocess
         try:
             subprocess.run(['sh', self._WEB_INITD, 'start'],
@@ -1156,28 +1236,20 @@ class MultiAce:
         except Exception as e:
             logging.info('[multiACE] init-daemon web start failed: %s', e)
 
-    def _sync_stock_entangle_detect(self):
+    def _disable_stock_entangle_detect(self):
         for head in range(4):
             ed = self.printer.lookup_object(
                 'filament_entangle_detect e%d_filament' % head, None)
             if ed is None or not hasattr(ed, 'skip_entangle_check'):
                 continue
             try:
-                uses_stock_feeder = (
-                    self._ace_mode == 'head'
-                    and head != self._ace_head
-                    and not self.head_is_manual(head))
-                skip_stock = not uses_stock_feeder
-                ed.skip_entangle_check(skip_stock)
+                ed.skip_entangle_check(True)
                 logging.info(
-                    '[multiACE] stock filament_entangle_detect head=%d %s '
-                    '(mode=%s ace_head=%d manual=%s)'
-                    % (head, 'disabled' if skip_stock else 'enabled',
-                       self._ace_mode, self._ace_head,
-                       self.head_is_manual(head)))
+                    '[multiACE] disabled stock filament_entangle_detect '
+                    'on head %d (incompatible with ACE topology)' % head)
             except Exception as e:
                 logging.info(
-                    '[multiACE] failed to sync filament_entangle_detect '
+                    '[multiACE] failed to disable filament_entangle_detect '
                     'on head %d: %s' % (head, e))
 
     def _touch_homing_flag(self):
@@ -1198,7 +1270,6 @@ class MultiAce:
             pass
 
     def _feedlog_tick(self, eventtime):
-
         try:
             ps = self.printer.lookup_object('print_stats', None)
             if ps is None or getattr(ps, 'state', '') != 'printing':
@@ -1226,7 +1297,6 @@ class MultiAce:
         return eventtime + V2_FEED_LOG_INTERVAL
 
     def _feedlog_record(self, idx, slot, head, response):
-
         try:
             fi = ((response or {}).get('result') or {}).get('feed_info') or []
             rec = None
@@ -1267,773 +1337,92 @@ class MultiAce:
             except Exception:
                 pass
 
-    def _v2_feedinfo_record(self, idx, response):
+    def _airlog_tick(self, eventtime):
+        if getattr(self, '_fa_context', 'idle') != 'print':
+            self._airlog_state = None
+            return eventtime + AIRLOG_EMIT_S
         try:
-            fi = ((response or {}).get('result') or {}).get('feed_info') or []
-            slots = {}
-            now = self.reactor.monotonic()
-            for s in fi:
-                if not isinstance(s, dict):
-                    continue
+            ext = self.toolhead.get_extruder()
+            name = ext.get_name()
+            head = 0 if name == 'extruder' else int(
+                name.replace('extruder', '') or 0)
+            vel = 0.0
+            try:
+                mr = self.printer.lookup_object('motion_report', None)
+                if mr is not None:
+                    vel = abs(float(mr.get_status(eventtime).get(
+                        'live_extruder_velocity', 0.0) or 0.0))
+            except Exception:
+                pass
+            freq = None
+            if vel >= 0.3:
                 try:
-                    slot = int(s.get('index', len(slots)))
-                except (TypeError, ValueError):
-                    continue
-                steps = self._v2_feedinfo_int(s.get('steps', 0), 'steps',
-                                              idx, slot)
-                length = self._v2_feedinfo_int(s.get('length', 0), 'length',
-                                               idx, slot)
-                decoder = self._v2_feedinfo_int(s.get('decoder', 0), 'decoder',
-                                                idx, slot)
-                if steps is None or length is None or decoder is None:
-                    old = (self._v2_feed_info_per_ace.get(idx) or {}).get(slot)
-                    if old is None:
-                        continue
-                    steps = int(old.get('steps', 0) or 0)
-                    length = int(old.get('length', 0) or 0)
-                    decoder = int(old.get('decoder', 0) or 0)
-                rec = {
-                    'index': slot,
-                    'steps': steps,
-                    'length': length,
-                    'decoder': decoder,
-                    'ts': now,
-                }
-                old = (self._v2_feed_info_per_ace.get(idx) or {}).get(slot)
-                if old is not None:
-                    rec['dsteps'] = rec['steps'] - int(old.get('steps', 0) or 0)
-                    rec['dlength'] = rec['length'] - int(old.get('length', 0) or 0)
-                    rec['ddecoder'] = rec['decoder'] - int(old.get('decoder', 0) or 0)
-                else:
-                    rec['dsteps'] = rec['dlength'] = rec['ddecoder'] = 0
-                self._v2_mileage_window_record(idx, slot, rec)
-                slots[slot] = rec
-            if slots:
-                self._v2_feed_info_per_ace[idx] = slots
-        except Exception as e:
-            try:
-                self._feedlog.info('[feed-info] record error: %s' % e)
-            except Exception:
-                pass
-
-    def _v2_feedinfo_int(self, value, name, idx, slot):
-        try:
-            v = int(value or 0)
-        except (TypeError, ValueError):
-            return None
-        if v < 0 or v > 0xffffffffffffffff:
-            try:
-                self._feedlog.info(
-                    '[feed-info] ignore out-of-range %s ACE %d slot %d: %s'
-                    % (name, idx, slot, value))
-            except Exception:
-                pass
-            return None
-        if v > 0x7fffffffffffffff:
-            v -= 0x10000000000000000
-        return v
-
-    def _json_safe_value(self, value):
-        if isinstance(value, bool) or value is None:
-            return value
-        if isinstance(value, int):
-            if value < -0x8000000000000000 or value > 0x7fffffffffffffff:
-                return str(value)
-            return value
-        if isinstance(value, float):
-            return value
-        if isinstance(value, dict):
-            return {str(k): self._json_safe_value(v)
-                    for k, v in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [self._json_safe_value(v) for v in value]
-        return value
-
-    def _request_v2_feedinfo(self, idx):
-        if not self._is_v2_idx(idx):
-            return
-        if not self._connected_per_ace.get(idx, False):
-            return
-        try:
-            def _cb(self, response, _i=idx):
-                self._v2_feedinfo_record(_i, response)
-            self.send_request_to(idx, {'method': 'get_feed_info'}, _cb)
-        except Exception as e:
-            try:
-                self._feedlog.info('[feed-info] request ACE %d failed: %s'
-                                   % (idx, e))
-            except Exception:
-                pass
-
-    def get_v2_feed_mileage_snapshot(self, idx, slot, timeout=2.5):
-        """Read one fresh ACE2 Pro mileage sample for a specific slot."""
-        if not self._is_v2_idx(idx):
-            return None
-        if not self._connected_per_ace.get(idx, False):
-            return None
-        result = {'done': False, 'sample': None}
-
-        def _cb(self, response):
-            try:
-                feed_info = ((response or {}).get('result') or {}).get(
-                    'feed_info') or []
-                for item in feed_info:
-                    if not isinstance(item, dict):
-                        continue
-                    try:
-                        item_slot = int(item.get('index', -1))
-                    except (TypeError, ValueError):
-                        continue
-                    if item_slot != slot:
-                        continue
-                    sample = {}
-                    for name in ('decoder', 'length', 'steps'):
-                        value = self._v2_feedinfo_int(
-                            item.get(name, 0), name, idx, slot)
-                        if value is None:
-                            sample = None
-                            break
-                        sample[name] = value
-                    result['sample'] = sample
-                    break
-                self._v2_feedinfo_record(idx, response)
-            except Exception as e:
-                try:
-                    self._feedlog.info(
-                        '[load-mileage] ACE %d slot %d sample error: %s'
-                        % (idx, slot, e))
+                    freq = float(ext.binding_probe.sensor.get_coil_freq())
                 except Exception:
-                    pass
-            finally:
-                result['done'] = True
-
-        try:
-            self.send_request_to(idx, {'method': 'get_feed_info'}, _cb)
-        except Exception as e:
-            self._feedlog.info(
-                '[load-mileage] ACE %d slot %d request failed: %s'
-                % (idx, slot, e))
-            return None
-
-        deadline = self.reactor.monotonic() + timeout
-        while not result['done'] and self.reactor.monotonic() < deadline:
-            self.reactor.pause(self.reactor.monotonic() + 0.05)
-        if not result['done']:
-            self._feedlog.info(
-                '[load-mileage] ACE %d slot %d request timed out'
-                % (idx, slot))
-            return None
-        return result['sample']
-
-    def _v2_mileage_window_record(self, idx, slot, sample):
-        window = self._v2_mileage_windows.get((idx, slot))
-        if window is None:
-            return
-        current = {
-            key: int(sample.get(key, 0) or 0)
-            for key in ('decoder', 'length', 'steps')
-        }
-        last = window['last']
-        delta = {key: current[key] - last[key] for key in current}
-        # ACE2 counters are short-lived session counters. During an ordinary
-        # flush they may reset to zero and start increasing again. Count the
-        # new post-reset values, but never turn a negative endpoint delta into
-        # success by itself.
-        reset = (delta['steps'] <= -30
-                 and (delta['decoder'] <= -2 or delta['length'] <= -2))
-        for key in current:
-            window['total'][key] += (current[key] if reset
-                                     else max(0, delta[key]))
-        if reset:
-            window['resets'] += 1
-        window['last'] = current
-        window['samples'] += 1
-
-    def begin_v2_feed_mileage_window(self, idx, slot, baseline):
-        """Sample only the upcoming flush, excluding recovery/grinding."""
-        self.end_v2_feed_mileage_window(idx, slot)
-        key = (idx, slot)
-        window = {
-            'last': {name: int((baseline or {}).get(name, 0) or 0)
-                     for name in ('decoder', 'length', 'steps')},
-            'total': {'decoder': 0, 'length': 0, 'steps': 0},
-            'resets': 0,
-            'samples': 0,
-            'timer': None,
-        }
-        self._v2_mileage_windows[key] = window
-
-        def _sample_tick(eventtime):
-            if self._v2_mileage_windows.get(key) is not window:
-                return self.reactor.NEVER
-            self._request_v2_feedinfo(idx)
-            return eventtime + 0.25
-
-        window['timer'] = self.reactor.register_timer(
-            _sample_tick, self.reactor.NOW)
-
-    def end_v2_feed_mileage_window(self, idx, slot):
-        window = self._v2_mileage_windows.pop((idx, slot), None)
-        if window is None:
-            return None
-        timer = window.get('timer')
-        if timer is not None:
-            try:
-                self.reactor.unregister_timer(timer)
-            except Exception:
-                pass
-        return {
-            'decoder': window['total']['decoder'],
-            'length': window['total']['length'],
-            'steps': window['total']['steps'],
-            'resets': window['resets'],
-            'samples': window['samples'],
-        }
-
-    def v2_feed_mileage_advanced(self, before, after, observed=None):
-        if before is None or after is None:
-            return False
-        if observed is not None:
-            return (int(observed.get('steps', 0)) >= 60
-                    and (int(observed.get('decoder', 0)) >= 5
-                         or int(observed.get('length', 0)) >= 5))
-        ddecoder = (int(after.get('decoder', 0))
-                    - int(before.get('decoder', 0)))
-        dlength = (int(after.get('length', 0))
-                   - int(before.get('length', 0)))
-        dsteps = (int(after.get('steps', 0))
-                  - int(before.get('steps', 0)))
-        # A reset or a small vibration must never count as a successful
-        # flush. Real successful flushes observed on ACE2 advance roughly
-        # 9-10 mileage units and over 100 steps.
-        return dsteps >= 60 and (ddecoder >= 5 or dlength >= 5)
-
-    def _current_print_ext_pos(self):
-        try:
-            pt = self.printer.lookup_object('mcu').estimated_print_time(
-                self.reactor.monotonic())
-            return self.toolhead.get_extruder().find_past_position(pt)
+                    freq = None
+            st = self._airlog_state
+            if st is None or st['head'] != head:
+                st = self._airlog_state = {
+                    'head': head, 'start': eventtime, 'n': 0,
+                    'cmin': None, 'cmax': None,
+                    'vsum': 0.0, 'vmax': 0.0, 'nmove': 0}
+            st['n'] += 1
+            if freq is not None:
+                st['cmin'] = (freq if st['cmin'] is None
+                              else min(st['cmin'], freq))
+                st['cmax'] = (freq if st['cmax'] is None
+                              else max(st['cmax'], freq))
+            st['vsum'] += vel
+            st['vmax'] = max(st['vmax'], vel)
+            if vel >= 0.3:
+                st['nmove'] += 1
+            if eventtime - st['start'] >= AIRLOG_EMIT_S and st['n'] > 0:
+                delta = (st['cmax'] - st['cmin']
+                         if st['cmin'] is not None else None)
+                self._wiggle_log.info(
+                    'airlog head=%d win=%.0fs n=%d moving=%d vel_mean=%.1f '
+                    'vel_max=%.1f coil_min=%s coil_max=%s coil_delta=%s',
+                    st['head'], eventtime - st['start'], st['n'],
+                    st['nmove'], st['vsum'] / st['n'], st['vmax'],
+                    ('%.0f' % st['cmin']) if st['cmin'] is not None else '-',
+                    ('%.0f' % st['cmax']) if st['cmax'] is not None else '-',
+                    ('%.0f' % delta) if delta is not None else '-')
+                self._airlog_state = None
         except Exception:
-            try:
-                return self.toolhead.get_position()[3]
-            except Exception:
-                return 0.0
+            logging.exception('[multiACE] airlog tick failed')
+            self._airlog_state = None
+        return eventtime + AIRLOG_SAMPLE_S
 
-    def _feed_watchdog_tick(self, eventtime):
-        interval = self._v2_feed_watchdog_interval
+    def _reactor_stall_watchdog(self, eventtime):
+        import gc
+        sched = getattr(self, '_watchdog_next', None)
         try:
-            if (not self._v2_feed_watchdog_enabled
-                    and not self._v2_toolhead_jam_watchdog):
-                return self.reactor.NEVER
-            ps = self.printer.lookup_object('print_stats', None)
-            ps_state = ''
-            if ps is not None:
-                try:
-                    ps_state = str(ps.get_status(eventtime).get('state', '')).lower()
-                except Exception:
-                    ps_state = str(getattr(ps, 'state', '') or '').lower()
-            if ps is None or ps_state != 'printing':
-                self._feed_watchdog_last.clear()
-                self._feed_watchdog_bad.clear()
-                self._feed_watchdog_rearm_pending.clear()
-                self._feed_watchdog_assist_origin.clear()
-                self._feed_watchdog_outer_since.clear()
-                self._feed_watchdog_print_start_ts = 0.0
-                self._feed_watchdog_seen_mileage.clear()
-                self._feed_watchdog_soft_warned.clear()
-                self._feed_watchdog_no_baseline.clear()
-                self._feed_watchdog_paused.clear()
-                self._toolhead_jam_watchdog.clear()
-                self._toolhead_jam_paused.clear()
-                return eventtime + interval
-            if not self._auto_feed_enabled or self._fa_context != 'print':
-                return eventtime + interval
-            head = self._active_head_index()
-            if head is None or not self.head_uses_ace(head):
-                return eventtime + interval
-            src = self._head_source.get(head)
-            if src is None:
-                return eventtime + interval
-            idx = int(src.get('ace_index', -1))
-            slot = int(src.get('slot', -1))
-            if idx < 0 or slot < 0 or slot > 3:
-                return eventtime + interval
-            proto = self._protocols.get(idx)
-            if proto is None or getattr(proto, 'NAME', None) != 'v2':
-                return eventtime + interval
-            if not self._connected_per_ace.get(idx, False):
-                return eventtime + interval
-
-            def _key_cb(self, response, _i=idx):
-                self._v2_key_state_record(_i, response)
-            self.send_request_to(idx, {'method': 'get_key_state'}, _key_cb)
-
-            def _cb(self, response, _i=idx, _s=slot, _h=head):
-                self._feed_watchdog_record(_i, _s, _h, response)
-            self.send_request_to(idx, {'method': 'get_feed_info'}, _cb)
-        except Exception as e:
-            try:
-                self._feedlog.info('[feed-watchdog] tick error: %s' % e)
-            except Exception:
-                pass
-        return eventtime + interval
-
-    def _v2_key_state_record(self, idx, response):
-        try:
-            fields = ((response or {}).get('result') or {}).get('fields') or {}
-            raw = fields.get('1', fields.get(1, None))
-            if raw is None:
-                return
-            self._v2_key_state_per_ace[idx] = {
-                'raw': int(raw),
-                'ts': self.reactor.monotonic(),
-            }
-        except Exception as e:
-            try:
-                self._feedlog.info('[feed-watchdog] key-state record error: %s' % e)
-            except Exception:
-                pass
-
-    def _v2_buffer_position(self, idx, slot):
-        """Best-effort ACE2 Pro buffer hall decode from GET_KEY_STATE.
-
-        Captured on a local ACE2 Pro:
-          all slots at rest -> field1=17476, bits 2/6/10/14 set
-          slot 0 outer      -> field1=83008, bit 2 clears, shared bit 16 sets
-          slot 0 inner      -> field1=17480, bit 2 clears, bit 3 sets
-          slot 1 outer      -> field1=82948, bit 6 clears, shared bit 16 sets
-        The bit layout is regular enough to use for outer-trigger gating.
-        """
-        try:
-            slot = int(slot)
-        except (TypeError, ValueError):
-            return 'unknown'
-        if slot < 0 or slot > 3:
-            return 'unknown'
-        rec = self._v2_key_state_per_ace.get(idx) or {}
-        raw = rec.get('raw')
-        ts = rec.get('ts', 0.0)
-        if raw is None:
-            return 'unknown'
-        if self.reactor.monotonic() - ts > max(2.0, self._v2_feed_watchdog_interval * 4.0):
-            return 'unknown'
-        outer_bit = 16
-        origin_bit = 2 + (slot * 4)
-        inner_bit = 3 + (slot * 4)
-        if raw & (1 << origin_bit):
-            return 'origin'
-        if raw & (1 << inner_bit):
-            return 'inner'
-        if raw & (1 << outer_bit):
-            return 'outer'
-        return 'unknown'
-
-    def _head_filament_detected(self, head):
-        sensor = self.printer.lookup_object(
-            'filament_motion_sensor e%d_filament' % head, None)
-        try:
-            return bool(sensor and sensor.get_status(0).get('filament_detected'))
+            gen2 = gc.get_stats()[2]['collections']
         except Exception:
-            return False
-
-    def _v2_recent_print_retraction(self, idx, now):
-        """Avoid judging an ACE buffer while the slicer is cycling retractions.
-
-        A small model can alternate retract and prime faster than the 0.5s
-        feed-info poll.  The sampled E endpoint can then be positive even
-        though the ACE is correctly absorbing/releasing buffer slack.
-        """
-        state = self._v2_velocity_state.get(idx) or {}
-        reverse_at = float(state.get('last_reverse_time', 0.0) or 0.0)
-        return (reverse_at > 0.0
-                and now - reverse_at < self._v2_feed_watchdog_retract_grace)
-
-    def _system_entangle_preference(self):
-        enabled = False
-        sensitivity = 'medium'
-        try:
-            ptc = self.printer.lookup_object('print_task_config', None)
-            cfg = getattr(ptc, 'print_task_config', {}) if ptc else {}
-            enabled = bool(cfg.get('filament_entangle_detect', False))
-            sensitivity = str(
-                cfg.get('filament_entangle_sen', 'medium') or 'medium').lower()
-        except Exception as e:
-            self._feedlog.info(
-                '[toolhead-jam] read system preference failed: %s' % e)
-        if sensitivity not in ('high', 'medium', 'low'):
-            sensitivity = 'medium'
-        multiplier = {'high': 1.0, 'medium': 1.5, 'low': 3.0}[sensitivity]
-        return enabled, sensitivity, multiplier
-
-    def _trigger_toolhead_jam_alarm(self, head, idx, slot, ext_delta, age,
-                                    buffer_pos, sensitivity, threshold):
-        key = (idx, slot, head)
-        if key in self._toolhead_jam_paused:
-            return
-        self._toolhead_jam_paused.add(key)
-        msg = (
-            'detect filament tangled! multiACE toolhead jam: T%s / ACE %s '
-            'Slot %s extruded %.1fmm for %.1fs while the ACE buffer stayed '
-            'at origin and ACE mileage did not move.'
-            % (self._disp(head), self._disp(idx), self._disp(slot),
-               ext_delta, age))
-        self._feedlog.error(
-            '[toolhead-jam] PAUSE head=%d ace=%d slot=%d buffer=%s '
-            'ext_delta=%.2f age=%.1fs sensitivity=%s threshold=%.1fmm'
-            % (head, idx, slot, buffer_pos, ext_delta, age,
-               sensitivity, threshold))
-        self.log_error(self._t(
-            'msg.airprint_detected_level', head=self._disp(head),
-            ace=self._disp(idx), slot=self._disp(slot),
-            level=self._t('msg.airprint_level_' + sensitivity),
-            threshold=threshold))
-        try:
-            self.printer.send_event(
-                "print_stats:update_exception_info",
-                523, head, 38, "detect filament tangled!", 2)
-        except Exception as e:
-            self._feedlog.info('[toolhead-jam] update_exception_info failed: %s' % e)
-        try:
-            pause_resume = self.printer.lookup_object('pause_resume', None)
-            if pause_resume is not None:
-                pause_resume.send_pause_command()
-        except Exception as e:
-            self._feedlog.info('[toolhead-jam] send_pause_command failed: %s' % e)
-        try:
-            self.printer.send_event("filament_entangle_detect:tangled", head)
-        except Exception:
-            pass
-        try:
-            em = self.printer.lookup_object('exception_manager', None)
-            if em is not None:
-                em.raise_exception_async(
-                    id=523, index=head, code=38,
-                    message="detect filament tangled!",
-                    oneshot=1, level=2)
-        except Exception as e:
-            self._feedlog.info('[toolhead-jam] raise_exception failed: %s' % e)
-        try:
-            self.gcode.run_script('\nPAUSE\nM400\n')
-        except Exception as e:
-            self._feedlog.info('[toolhead-jam] PAUSE/M400 failed: %s' % e)
-
-    def _toolhead_jam_watchdog_record(self, idx, slot, head, ext, dext,
-                                      moved, buffer_pos, comm_ok):
-        if not self._v2_toolhead_jam_watchdog:
-            return
-        key = (idx, slot, head)
-        now = self.reactor.monotonic()
-        enabled, sensitivity, multiplier = self._system_entangle_preference()
-        if not enabled:
-            self._toolhead_jam_watchdog.pop(key, None)
-            return
-        if key in self._toolhead_jam_paused:
-            return
-        if dext < -0.5 or moved or buffer_pos in ('outer', 'inner'):
-            self._toolhead_jam_watchdog.pop(key, None)
-            return
-        if not comm_ok or buffer_pos != 'origin':
-            self._toolhead_jam_watchdog.pop(key, None)
-            return
-        if not self._head_filament_detected(head):
-            self._toolhead_jam_watchdog.pop(key, None)
-            return
-        if dext <= self._v2_feed_watchdog_min_extrude:
-            return
-
-        rec = self._toolhead_jam_watchdog.get(key)
-        if rec is None:
-            rec = {'ts': now, 'ext': ext, 'skip': self._v2_toolhead_jam_skip}
-            self._toolhead_jam_watchdog[key] = rec
-            return
-
-        if rec.get('skip', 0.0) > 0.0:
-            rec['skip'] = max(0.0, float(rec.get('skip', 0.0)) - max(0.0, dext))
-            rec['ts'] = now
-            rec['ext'] = ext
-            return
-
-        age = now - float(rec.get('ts', now))
-        ext_delta = max(0.0, ext - float(rec.get('ext', ext)))
-        sensitivity_threshold = self._v2_toolhead_jam_min_extrude * multiplier
-        if (age >= self._v2_toolhead_jam_grace
-                and ext_delta >= sensitivity_threshold):
-            self._trigger_toolhead_jam_alarm(
-                head, idx, slot, ext_delta, age, buffer_pos,
-                sensitivity, sensitivity_threshold)
-
-    def _feed_watchdog_record(self, idx, slot, head, response):
-        try:
-            fi = ((response or {}).get('result') or {}).get('feed_info') or []
-            self._v2_feedinfo_record(idx, response)
-            rec = None
-            for s in fi:
-                if s.get('index') == slot:
-                    rec = s
-                    break
-            if rec is None:
-                return
-            now = self.reactor.monotonic()
-            ext = self._current_print_ext_pos()
-            decoder = self._v2_feedinfo_int(
-                rec.get('decoder', 0), 'decoder', idx, slot)
-            length = self._v2_feedinfo_int(
-                rec.get('length', 0), 'length', idx, slot)
-            steps = self._v2_feedinfo_int(
-                rec.get('steps', 0), 'steps', idx, slot)
-            if decoder is None or length is None or steps is None:
-                return
-            key = (idx, slot)
-            last = self._feed_watchdog_last.get(key)
-            self._feed_watchdog_last[key] = (now, ext, decoder, length, steps)
-            if last is None:
-                return
-
-            _last_t, last_ext, last_dec, last_len, last_steps = last
-            dext = ext - last_ext
-            ddec = decoder - last_dec
-            dlen = length - last_len
-            dsteps = steps - last_steps
-            mileage_moved = ddec != 0 or dlen != 0 or dsteps != 0
-            if dext <= self._v2_feed_watchdog_min_extrude:
-                if dext < -0.5:
-                    self._feed_watchdog_bad[key] = 0
-                    self._feed_watchdog_rearm_pending.pop(key, None)
-                    self._toolhead_jam_watchdog.pop((idx, slot, head), None)
-                return
-
-            slot_status = self._v2_get_slot_status(idx, slot)
-            buffer_pos = self._v2_buffer_position(idx, slot)
-            comm_ok = (buffer_pos != 'unknown')
-            buffer_released = False
-            if buffer_pos == 'outer':
-                self._feed_watchdog_outer_since.setdefault(key, now)
-            else:
-                buffer_released = (
-                    self._feed_watchdog_outer_since.pop(key, None) is not None)
-            if buffer_released:
-                # The buffer returned after reaching its outer limit: ACE has
-                # demonstrably supplied filament. Start a fresh observation
-                # window instead of carrying a prior no-mileage suspicion.
-                self._feed_watchdog_bad[key] = 0
-                self._feed_watchdog_rearm_pending.pop(key, None)
-                self._feed_watchdog_assist_origin.pop(key, None)
-                self._feed_watchdog_no_baseline.pop(key, None)
-                self._toolhead_jam_watchdog.pop((idx, slot, head), None)
-                return
-            if self._v2_recent_print_retraction(idx, now):
-                # Reset both watchdogs.  Net E over a polling interval is not
-                # meaningful when a retract/prime pair occurred inside it.
-                self._feed_watchdog_bad[key] = 0
-                self._feed_watchdog_rearm_pending.pop(key, None)
-                self._feed_watchdog_assist_origin.pop(key, None)
-                self._feed_watchdog_outer_since.pop(key, None)
-                self._feed_watchdog_no_baseline.pop(key, None)
-                self._toolhead_jam_watchdog.pop((idx, slot, head), None)
-                return
-            self._toolhead_jam_watchdog_record(
-                idx, slot, head, ext, dext, mileage_moved, buffer_pos, comm_ok)
-            if not self._v2_feed_watchdog_enabled:
-                return
-            outer_since = self._feed_watchdog_outer_since.get(key)
-            outer_ready = (buffer_pos == 'outer'
-                           and outer_since is not None
-                           and now - outer_since
-                               >= self._v2_feed_watchdog_outer_hold)
-            # Mileage is meaningful only when the physical buffer's outer
-            # Hall signal has remained asserted. Never infer this condition
-            # from a host-side assist state when the Hall sample is unknown.
-            if not outer_ready:
-                self._feed_watchdog_bad[key] = 0
-                self._feed_watchdog_rearm_pending.pop(key, None)
-                self._feed_watchdog_assist_origin.pop(key, None)
-                self._feed_watchdog_no_baseline.pop(key, None)
-                self._feedlog.info(
-                    '[feed-watchdog] waiting buffer outer trigger ACE %d '
-                    'slot %d head=%d status=%s buffer=%s dext=%.2f'
-                    % (idx, slot, head, slot_status, buffer_pos, dext))
-                return
-            if outer_ready:
-                since = self._v2_slot_status_since.get((idx, slot), now)
-                origin = self._feed_watchdog_assist_origin.get(key)
-                if origin is None:
-                    origin = (now, last_ext)
-                    self._feed_watchdog_assist_origin[key] = origin
-                origin_t, origin_ext = origin
-                if now - since < self._v2_feed_watchdog_assist_grace:
-                    self._feed_watchdog_bad[key] = 0
-                    return
-                if now - origin_t < self._v2_feed_watchdog_assist_grace:
-                    self._feed_watchdog_bad[key] = 0
-                    return
-                if (ext - origin_ext) < self._v2_feed_watchdog_buffer_slack:
-                    self._feed_watchdog_bad[key] = 0
-                    return
-            else:
-                self._feed_watchdog_assist_origin.pop(key, None)
-                self._feed_watchdog_no_baseline.pop(key, None)
-            stalled = (ddec <= 0 and dlen <= 0 and dsteps <= 0)
-            if not outer_ready:
-                stalled = True
-            if not stalled:
-                self._feed_watchdog_bad[key] = 0
-                self._feed_watchdog_rearm_pending.pop(key, None)
-                self._feed_watchdog_seen_mileage.add(key)
-                self._feed_watchdog_soft_warned.discard(key)
-                self._feed_watchdog_no_baseline.pop(key, None)
-                self._feed_watchdog_paused.discard(key)
-                return
-
-            seen_mileage = key in self._feed_watchdog_seen_mileage
-            start_age = (now - self._feed_watchdog_print_start_ts
-                         if self._feed_watchdog_print_start_ts else 9999.0)
-            startup_window = start_age < self._v2_feed_watchdog_start_grace
-            if comm_ok and outer_ready and not seen_mileage:
-                nb = self._feed_watchdog_no_baseline.get(key)
-                if nb is None:
-                    nb = {
-                        'ts': now,
-                        'ext': origin_ext if outer_ready else last_ext,
-                        'rearms': 0,
-                        'last_rearm': 0.0,
-                    }
-                    self._feed_watchdog_no_baseline[key] = nb
-                nb_age = now - float(nb.get('ts', now))
-                nb_ext = max(0.0, ext - float(nb.get('ext', ext)))
-                last_rearm = self._feed_watchdog_rearms.get(key, 0.0)
-                if now - last_rearm >= self._v2_feed_watchdog_cooldown:
-                    self._feed_watchdog_rearms[key] = now
-                    self._feed_watchdog_bad[key] = 0
-                    nb['rearms'] = int(nb.get('rearms', 0)) + 1
-                    nb['last_rearm'] = now
-                    self._feedlog.warning(
-                        '[feed-watchdog] startup/no-baseline soft rearm ACE %d '
-                        'slot %d head=%d status=%s buffer=%s seen=%s '
-                        'start_age=%.1fs outer_age=%.1fs outer_ext=%.2f '
-                        'dext=%.2f ddec=%d dlen=%d dsteps=%d'
-                        % (idx, slot, head, slot_status, buffer_pos,
-                           seen_mileage, start_age, nb_age, nb_ext, dext,
-                           ddec, dlen, dsteps))
-                    self._clear_fa_cache_for(idx, slot)
-                    try:
-                        self.send_request_to(idx, {'method': 'get_status'},
-                                             lambda *a, **kw: None)
-                    except Exception:
-                        pass
-                    self._arm_fa_for(idx, slot)
-                elif key not in self._feed_watchdog_soft_warned:
-                    self._feed_watchdog_soft_warned.add(key)
-                    self._feedlog.info(
-                        '[feed-watchdog] suppress pause while mileage baseline '
-                        'settles ACE %d slot %d head=%d buffer=%s seen=%s '
-                        'start_age=%.1fs outer_age=%.1fs outer_ext=%.2f'
-                        % (idx, slot, head, buffer_pos, seen_mileage,
-                           start_age, nb_age, nb_ext))
-                confirmed_no_start = (
-                    nb_age >= self._v2_feed_watchdog_no_baseline_grace
-                    and nb_ext >= self._v2_feed_watchdog_no_baseline_extrude
-                    and int(nb.get('rearms', 0)) > 0
-                    and now - float(nb.get('last_rearm', 0.0))
-                        >= self._v2_feed_watchdog_rearm_grace)
-                if confirmed_no_start and key not in self._feed_watchdog_soft_warned:
-                    # A new head/slot has no mileage baseline yet.  This can
-                    # legitimately persist through short, retract-heavy paths;
-                    # re-arm and log it, but never pause a print until this
-                    # exact path has first demonstrated real ACE mileage.
-                    self._feed_watchdog_soft_warned.add(key)
-                    self._feedlog.warning(
-                        '[feed-watchdog] no-baseline ACE %d slot %d head=%d '
-                        'still has no mileage after re-arm; monitoring only '
-                        '(no print pause) outer_age=%.1fs outer_ext=%.2f'
-                        % (idx, slot, head, nb_age, nb_ext))
-                return
-
-            bad = self._feed_watchdog_bad.get(key, 0) + 1
-            self._feed_watchdog_bad[key] = bad
-            if bad < self._v2_feed_watchdog_max_stalls:
-                self._feedlog.warning(
-                    '[feed-watchdog] suspect ACE %d slot %d head=%d '
-                    'status=%s dext=%.2f ddec=%d dlen=%d dsteps=%d bad=%d/%d'
-                    % (idx, slot, head, slot_status, dext, ddec, dlen, dsteps,
-                       bad, self._v2_feed_watchdog_max_stalls))
-                return
-
-            last_rearm = self._feed_watchdog_rearms.get(key, 0.0)
-            pending_since = self._feed_watchdog_rearm_pending.get(key)
-            if pending_since is not None:
-                wait = max(self._v2_feed_watchdog_rearm_grace,
-                           self._v2_feed_watchdog_interval * 2.0,
-                           self._v2_feed_watchdog_assist_grace)
-                if now - pending_since < wait:
-                    return
-                if self._v2_feed_watchdog_pause_after <= 0:
-                    self._feedlog.error(
-                        '[feed-watchdog] confirmed stall ACE %d slot %d '
-                        'head=%d status=%s after rearm, pause disabled'
-                        % (idx, slot, head, slot_status))
-                    self._feed_watchdog_rearm_pending.pop(key, None)
-                    return
-                if key not in self._feed_watchdog_paused:
-                    self._feed_watchdog_paused.add(key)
-                    self._feedlog.error(
-                        '[feed-watchdog] PAUSE ACE %d slot %d head=%d '
-                        'status=%s buffer=%s dext=%.2f ddec=%d dlen=%d dsteps=%d '
-                        'after rearm %.1fs ago'
-                        % (idx, slot, head, slot_status, buffer_pos, dext,
-                           ddec, dlen, dsteps, now - pending_since))
-                    self.log_error(
-                        '[multiACE] ACE %s Slot %s / T%s feed assist fault: '
-                        'buffer is in assist position but ACE mileage did not '
-                        'move after wake/re-arm. Check filament path, buffer, '
-                        'ACE power and USB-RS485 link, then resume.'
-                        % (self._disp(idx), self._disp(slot),
-                           self._disp(head)))
-                    try:
-                        self.gcode.run_script_from_command('PAUSE')
-                    except Exception as e:
-                        self._feedlog.error(
-                            '[feed-watchdog] PAUSE command failed: %s' % e)
-                return
-            if now - last_rearm < self._v2_feed_watchdog_cooldown:
-                return
-            self._feed_watchdog_rearms[key] = now
-            self._feed_watchdog_rearm_pending[key] = now
-            self._feed_watchdog_bad[key] = 0
-            self._feedlog.error(
-                '[feed-watchdog] wake/rearm ACE %d slot %d head=%d '
-                'status=%s buffer=%s dext=%.2f ddec=%d dlen=%d dsteps=%d'
-                % (idx, slot, head, slot_status, buffer_pos, dext, ddec,
-                   dlen, dsteps))
-            self._telemetry('FEED_WATCHDOG_REARM', {
-                'head': head, 'ace': idx, 'slot': slot,
-                'slot_status': slot_status, 'buffer_pos': buffer_pos,
-                'dext': dext, 'ddec': ddec, 'dlen': dlen, 'dsteps': dsteps,
-            })
-            self._clear_fa_cache_for(idx, slot)
-            try:
-                self.send_request_to(idx, {'method': 'get_status'},
-                                     lambda *a, **kw: None)
-            except Exception:
-                pass
-            self._arm_fa_for(idx, slot)
-            n = self._usb_stats.setdefault('feed_watchdog_rearms', 0) + 1
-            self._usb_stats['feed_watchdog_rearms'] = n
-        except Exception as e:
-            try:
-                self._feedlog.info('[feed-watchdog] record error: %s' % e)
-            except Exception:
-                pass
+            gen2 = None
+        if sched is not None:
+            late = eventtime - sched
+            if late > REACTOR_STALL_THRESHOLD:
+                prev_gen2 = getattr(self, '_watchdog_gen2', None)
+                gc_hit = (prev_gen2 is not None and gen2 is not None
+                          and gen2 > prev_gen2)
+                logging.warning(
+                    '[multiACE] reactor stall %.0fms%s (gc_counts=%s) - '
+                    'correlate with any 0003-0522 Timer-too-close near this ts'
+                    % (late * 1000.,
+                       ' [gen2-GC in window]' if gc_hit else '',
+                       gc.get_count()))
+        self._watchdog_gen2 = gen2
+        self._watchdog_next = eventtime + REACTOR_WATCHDOG_INTERVAL
+        return self._watchdog_next
 
     def _print_stats_state(self):
         try:
-            ps = self.printer.lookup_object('print_stats', None)
-            if ps is None:
+            print_stats = self.printer.lookup_object('print_stats', None)
+            if print_stats is None:
                 return ''
-            try:
-                return str(ps.get_status(self.reactor.monotonic()).get(
-                    'state', '')).lower()
-            except Exception:
-                return str(getattr(ps, 'state', '') or '').lower()
+            return str(print_stats.get_status(self.reactor.monotonic()).get(
+                'state', '')).lower()
         except Exception:
             return ''
 
@@ -2041,210 +1430,371 @@ class MultiAce:
         return self._print_stats_state() in ('printing', 'paused')
 
     def _v2_overtemp_aces(self):
-        out = []
+        hot = []
         for idx in range(len(self._ace_devices)):
             if not self._is_v2_idx(idx):
                 continue
-            info = self._info_per_ace.get(idx) or {}
-            temp = info.get('temp')
             try:
-                temp_f = float(temp)
+                temp = float((self._info_per_ace.get(idx) or {}).get('temp'))
             except (TypeError, ValueError):
                 continue
-            if temp_f >= self._v2_print_block_temp:
-                out.append((idx, temp_f))
-        return out
+            if temp >= self._v2_print_block_temp:
+                hot.append((idx, temp))
+        return hot
 
-    def _v2_overtemp_detail(self, hot_aces):
-        return ', '.join(
-            'ACE %s %.1fC' % (self._disp(idx), temp)
-            for idx, temp in hot_aces)
+    def _set_v2_exhaust(self, idx, is_open, delay=None, require_dryer=False):
+        """Queue a valve change after ACE2's own dryer transition settles."""
+        if not self._is_v2_idx(idx) or not self._connected_per_ace.get(idx, False):
+            return
+        if delay is None:
+            if is_open:
+                delay = self._v2_dry_exhaust_open_delay
+                # 0 disables dryer-owned opening. Explicit user valve
+                # commands bypass this helper and remain immediate.
+                if delay <= 0:
+                    return
+            else:
+                # Keep the ACE2 firmware guard for automatic closing; the
+                # user-configurable value applies to opening only.
+                delay = 10.0
+        now = self.reactor.monotonic()
+        self._v2_exhaust_pending[idx] = {
+            'open': bool(is_open), 'at': now + float(delay),
+            'require_dryer': bool(require_dryer),
+        }
+        self._schedule_v2_dry_lifecycle()
 
-    def _run_pause_async(self):
-        def _pause(eventtime):
-            try:
-                self.gcode.run_script_from_command('PAUSE')
-            except Exception as e:
-                logging.info('[multiACE] print-temp PAUSE failed: %s' % e)
-            return self.reactor.NEVER
-        self.reactor.register_timer(_pause, self.reactor.NOW)
-
-    def _pause_for_v2_overtemp(self, reason):
-        hot_aces = self._v2_overtemp_aces()
-        if not hot_aces:
-            return False
-        if self._v2_print_guard_paused:
-            return True
-        self._stop_all_v2_auto_dry(reason)
-        detail = self._v2_overtemp_detail(hot_aces)
-        self.log_error(self._t(
-            'msg.print_block_wait',
-            limit=self._v2_print_block_temp, detail=detail))
-        self._v2_print_guard_paused = True
-        self._run_pause_async()
-        self._schedule_v2_cooldown_resume()
-        return True
+    def _send_v2_exhaust_now(self, idx, is_open):
+        if not self._is_v2_idx(idx) or not self._connected_per_ace.get(idx, False):
+            return
+        try:
+            def callback(self, response, _idx=idx, _open=bool(is_open)):
+                if response and response.get('code', -1) == 0:
+                    self._v2_exhaust_open[_idx] = _open
+            self.send_request_to(idx, {
+                'method': 'set_valve',
+                'params': {'v1': bool(is_open), 'v2': bool(is_open)},
+            }, callback)
+        except Exception as e:
+            logging.info('[multiACE] exhaust %s ACE %d failed: %s',
+                         'open' if is_open else 'close', idx, e)
 
     def _stop_v2_auto_dry(self, idx, reason):
-        if idx not in self._v2_auto_dry_active:
+        # Manual and automatic drying are independent UI tasks.  Never let
+        # the automatic humidity controller stop a manual cycle on the same
+        # ACE; only ACE_STOP_DRYING or the manual duration may stop it.
+        if idx in self._v2_manual_dry_active:
             return
+        was_active = idx in self._v2_auto_dry_active
         self._v2_auto_dry_active.discard(idx)
+        pending = self._v2_exhaust_pending.pop(idx, None)
+        # ACE2 closes its own valve when DRYING stops. Reflect the requested
+        # stop immediately and discard a not-yet-sent delayed open command.
+        self._v2_exhaust_open[idx] = False
+        if not was_active and not self._v2_exhaust_open.get(idx, False):
+            return
         if not self._is_v2_idx(idx) or not self._connected_per_ace.get(idx, False):
             return
+        self._set_v2_exhaust(idx, False, require_dryer=True)
         try:
-            def _cb(self, response, _i=idx, _r=reason):
-                code = response.get('code', -1) if response else -1
-                self._fa_log.info(
-                    '[auto-dry] stop ACE %d reason=%s code=%s'
-                    % (_i, _r, code))
-            self.send_request_to(idx, {"method": "drying_stop"}, _cb)
+            def callback(self, response, _idx=idx):
+                self._v2_fan_running[_idx] = False
+            self.send_request_to(idx, {'method': 'drying_stop'}, callback)
         except Exception as e:
-            logging.info('[multiACE] auto-dry stop ACE %d failed: %s' % (idx, e))
-
-    def _stop_all_v2_auto_dry(self, reason):
-        for idx in range(len(self._ace_devices)):
-            info = self._info_per_ace.get(idx) or {}
-            dryer = info.get('dryer_status', {}) or {}
-            dryer_running = dryer.get('status') not in (
-                None, '', 'stop', 'free')
-            should_stop = (
-                dryer_running and (
-                    reason in ('print_start', 'new_task_start', 'print_guard')
-                    or idx in self._v2_auto_dry_active
-                    or self._v2_auto_dry_enabled.get(idx, False))
-            )
-            if not should_stop:
-                continue
-            self._v2_auto_dry_active.add(idx)
-            self._stop_v2_auto_dry(idx, reason)
+            logging.info('[multiACE] auto-dry stop ACE %d failed: %s', idx, e)
 
     def _start_v2_auto_dry(self, idx, humidity):
-        if not self._is_v2_idx(idx) or not self._connected_per_ace.get(idx, False):
+        if (not self._is_v2_idx(idx)
+                or not self._connected_per_ace.get(idx, False)):
             return
         temp = self._v2_auto_dry_temp.get(idx, self._v2_auto_dry_default_temp)
-        duration = self._v2_auto_dry_duration.get(
-            idx, self._v2_auto_dry_default_duration)
-        fan_speed = 7000
+        duration = self._v2_auto_dry_duration.get(idx, self._v2_auto_dry_default_duration)
+        def callback(self, response, _idx=idx):
+            if response and response.get('code', -1) == 0:
+                # ACE2 DRYING starts the heater and its drying fan as one
+                # firmware state-machine transition. Sending an additional
+                # SET_FAN request here can leave the V2 writer busy and block
+                # every later ACE command.
+                self._v2_fan_running[_idx] = True
+                self._v2_auto_dry_active.add(_idx)
+                self._set_v2_exhaust(_idx, True, require_dryer=True)
         try:
-            def _cb(self, response, _i=idx, _h=humidity):
-                code = response.get('code', -1) if response else -1
-                if code == 0:
-                    self._v2_auto_dry_active.add(_i)
-                    try:
-                        def _fan_cb(self, response, _ace=_i):
-                            code = response.get('code', -1) if response else -1
-                            self._fa_log.info(
-                                '[auto-dry] fan ACE %d fan=100%% code=%s'
-                                % (_ace, code))
-                        self.send_request_to(_i, {
-                            "method": "set_fan_raw",
-                            "params": {
-                                "speed": fan_speed,
-                                "fan1": fan_speed > 0,
-                                "fan2": fan_speed > 0,
-                            },
-                        }, _fan_cb)
-                    except Exception as e:
-                        logging.info(
-                            '[multiACE] auto-dry fan ACE %d failed: %s'
-                            % (_i, e))
-                self._fa_log.info(
-                    '[auto-dry] start ACE %d humidity=%.1f temp=%d '
-                    'duration=%d fan=100%% code=%s'
-                    % (_i, _h, temp, duration, code))
-            self.send_request_to(idx, {
-                "method": "drying_raw",
-                "params": {
-                    "temp": temp,
-                    "duration": duration,
-                    "auto_roll": True,
-                },
-            }, _cb)
+            self.send_request_to(idx, {'method': 'drying_raw', 'params': {
+                'temp': temp, 'duration': duration, 'auto_roll': True}}, callback)
         except Exception as e:
-            logging.info('[multiACE] auto-dry start ACE %d failed: %s' % (idx, e))
+            logging.info('[multiACE] auto-dry start ACE %d failed: %s', idx, e)
 
-    def _v2_cooldown_resume_tick(self, eventtime):
+    def _remember_v2_manual_dry(self, idx, temp, duration):
+        # ACE2 interprets DRYING as (target temperature, duration in minutes).
+        # Temperature is a PID setpoint only; it is never an on/off threshold.
+        # The firmware starts its own heater/fan state machine and stops the
+        # cycle after the requested duration.  Keep a host-side deadline as a
+        # recovery fallback for stale/missing status heartbeats.
+        now = self.reactor.monotonic()
+        duration_minutes = max(1, int(duration))
+        self._v2_manual_dry_active[idx] = {
+            'temp': int(temp),
+            'duration': duration_minutes,
+            'started': now,
+            'end_at': now + duration_minutes * 60,
+            # A short grace period covers a delayed final status update.
+            'deadline': now + duration_minutes * 60 + 120,
+        }
+        self._schedule_v2_dry_lifecycle()
+
+    def _v2_dry_lifecycle_tick(self, eventtime):
+        for idx, pending in list(self._v2_exhaust_pending.items()):
+            info = self._info_per_ace.get(idx) or {}
+            dryer_status = (info.get('dryer_status') or {}).get('status')
+            hardware_running = (dryer_status == 'keeping'
+                                and self._v2_fan_running.get(idx, False))
+            if hardware_running:
+                self._v2_dry_hardware_seen[idx] = True
+            ready = (not pending.get('require_dryer', False)
+                     or hardware_running
+                     or (not pending.get('open', False)
+                         and self._v2_dry_hardware_seen.get(idx, False)))
+            if eventtime >= pending.get('at', 0) and ready:
+                self._v2_exhaust_pending.pop(idx, None)
+                self._send_v2_exhaust_now(idx, pending.get('open', False))
+        for idx, task in list(self._v2_manual_dry_active.items()):
+            if eventtime >= task.get('end_at', task.get('deadline', 0)):
+                self._v2_manual_dry_active.pop(idx, None)
+                # ACE2 owns the DRYING countdown and stops its heater/fan.
+                # multiACE only tracks the local UI task here; it does not
+                # send a second stop command at the deadline.
+        return (eventtime + 1.0 if (self._v2_manual_dry_active
+                                    or self._v2_exhaust_pending)
+                else self.reactor.NEVER)
+
+    def _schedule_v2_dry_lifecycle(self):
+        eventtime = self.reactor.monotonic()
+        if self._v2_dry_lifecycle_timer is None:
+            self._v2_dry_lifecycle_timer = self.reactor.register_timer(
+                self._v2_dry_lifecycle_tick, eventtime + 1.0)
+        else:
+            self.reactor.update_timer(self._v2_dry_lifecycle_timer,
+                                      eventtime + 1.0)
+
+    def _manual_v2_dry_task(self, idx):
+        task = self._v2_manual_dry_active.get(idx)
+        if task is None:
+            return None
+        if self.reactor.monotonic() <= task.get('deadline', 0):
+            return task
+        self._v2_manual_dry_active.pop(idx, None)
+        return None
+
+    def _pause_v2_dryer_for_print(self, idx, chamber_temp=None):
+        """Record and stop one running dryer without changing print state."""
+        if idx in self._v2_dry_paused_by_print:
+            return
+        info = self._info_per_ace.get(idx) or {}
+        dryer = info.get('dryer_status', {}) or {}
+        manual_task = self._manual_v2_dry_task(idx)
+        dryer_running = dryer.get('status') not in (None, '', 'stop', 'free')
+        if not dryer_running and manual_task is None:
+            return
         try:
-            hot_aces = self._v2_overtemp_aces()
-            if hot_aces:
-                return eventtime + 5.0
-            self._v2_cooldown_resume_active = False
-            self._v2_cooldown_resume_timer = None
-            self._v2_print_guard_paused = False
-            self.log_always(self._t('msg.print_block_resume'))
-            self.gcode.run_script_from_command('RESUME')
+            remain = max(1, int(float(dryer.get('remain_time', 0)) / 60.0))
+        except (TypeError, ValueError):
+            remain = 0
+        if remain <= 0 and manual_task is not None:
+            remain = max(1, int((manual_task['deadline'] -
+                                 self.reactor.monotonic()) / 60.0))
+        if remain <= 0:
+            remain = self.ace_dryer_duration.get(idx, self.dryer_duration)
+        is_auto = idx in self._v2_auto_dry_active
+        try:
+            target_temp = int(float(dryer.get('target_temp')))
+        except (TypeError, ValueError):
+            target_temp = 0
+        if target_temp <= 0 and manual_task is not None:
+            target_temp = manual_task['temp']
+        if target_temp <= 0:
+            target_temp = (self._v2_auto_dry_temp.get(idx)
+                           if is_auto else self.ace_dryer_temp.get(
+                               idx, self.dryer_temp))
+        self._v2_dry_paused_by_print[idx] = {
+            'auto': is_auto, 'temp': target_temp, 'duration': remain,
+        }
+        self._v2_auto_dry_active.discard(idx)
+        self._v2_manual_dry_active.pop(idx, None)
+        try:
+            self.send_request_to(idx, {'method': 'drying_stop'},
+                                 lambda self, response: None)
+            self._v2_fan_running[idx] = False
+            self._set_v2_exhaust(idx, False, require_dryer=True)
+            if chamber_temp is not None:
+                self.log_always(
+                    '[multiACE] Paused ACE%s drying at %.1fC for print limit %.1fC'
+                    % (self._disp(idx), chamber_temp,
+                       self._v2_print_block_temp))
         except Exception as e:
-            logging.info('[multiACE] cooldown resume failed: %s' % e)
-            return eventtime + 5.0
+            logging.info('[multiACE] print temperature dryer stop ACE %d failed: %s', idx, e)
+
+    def _pause_hot_v2_dryers_for_print(self):
+        for idx, temp in self._v2_overtemp_aces():
+            self._pause_v2_dryer_for_print(idx, temp)
+
+    def _pause_all_v2_dryers_for_print(self):
+        for idx in range(len(self._ace_devices)):
+            if self._is_v2_idx(idx):
+                self._pause_v2_dryer_for_print(idx)
+
+    def _run_pause_async(self):
+        if self._v2_print_temp_pause_requested:
+            return
+        self._v2_print_temp_pause_requested = True
+        def pause(eventtime):
+            try:
+                self.gcode.run_script_from_command('PAUSE')
+                self._v2_print_temp_pause_owned = True
+            except Exception as e:
+                logging.info('[multiACE] print-start temperature PAUSE failed: %s', e)
+            return self.reactor.NEVER
+        self.reactor.register_timer(pause, self.reactor.NOW)
+
+    def _v2_print_start_resume_tick(self, eventtime):
+        if not self._v2_print_start_temp_block:
+            self._v2_print_start_resume_timer = None
+            return self.reactor.NEVER
+        state = self._print_stats_state()
+        if self._v2_overtemp_aces():
+            if self._v2_print_temp_pause_owned and state == 'printing':
+                # The temperature gate had successfully paused this print, so
+                # returning to printing while still hot is a user override.
+                # Never inject a second PAUSE into the resume/homing path.
+                self._v2_print_temp_pause_owned = False
+                self._v2_print_temp_user_override = True
+                self._v2_print_start_resume_timer = None
+                self.log_always(self._t('msg.print_block_override'))
+                return self.reactor.NEVER
+            return eventtime + 2.0
+        if (self._v2_print_temp_pause_owned
+                and not self._v2_print_temp_user_override
+                and state == 'paused'):
+            self.log_always(self._t('msg.print_block_resume'))
+            # Relinquish ownership before RESUME, so a re-entrant print-start
+            # event cannot cause this gate to act on the resume operation.
+            self._v2_print_temp_pause_owned = False
+            try:
+                self.gcode.run_script_from_command('RESUME')
+            except Exception as e:
+                logging.info('[multiACE] print-start temperature RESUME failed: %s', e)
+        # Keep _v2_print_start_temp_block set for this whole print.  It
+        # prevents auto-drying from restarting mid-print, but no longer needs
+        # a polling timer once the initial temperature gate has opened.
+        self._v2_print_start_resume_timer = None
         return self.reactor.NEVER
 
-    def _schedule_v2_cooldown_resume(self):
-        if self._v2_cooldown_resume_active:
+    def _begin_print_temperature_policy(self):
+        """Apply the stricter rule that applies only at print start."""
+        if self._v2_print_start_temp_block or not self._v2_overtemp_aces():
             return
-        self._v2_cooldown_resume_active = True
-        eventtime = self.reactor.monotonic() + 5.0
-        self._v2_cooldown_resume_timer = self.reactor.register_timer(
-            self._v2_cooldown_resume_tick, eventtime)
+        self._v2_print_start_temp_block = True
+        self._v2_print_temp_pause_requested = False
+        self._v2_print_temp_pause_owned = False
+        self._v2_print_temp_user_override = False
+        self._pause_all_v2_dryers_for_print()
+        hot_detail = ', '.join(
+            'ACE %s %.1fC' % (self._disp(idx), temp)
+            for idx, temp in self._v2_overtemp_aces())
+        self.log_always(self._t(
+            'msg.print_block_wait', limit=self._v2_print_block_temp,
+            detail=hot_detail))
+        self._run_pause_async()
+        if self._v2_print_start_resume_timer is None:
+            self._v2_print_start_resume_timer = self.reactor.register_timer(
+                self._v2_print_start_resume_tick, self.reactor.monotonic() + 2.0)
+
+    def _resume_v2_dryers_after_print(self):
+        paused = self._v2_dry_paused_by_print
+        self._v2_dry_paused_by_print = {}
+        self._v2_print_start_temp_block = False
+        self._v2_print_start_resume_timer = None
+        self._v2_print_temp_pause_requested = False
+        self._v2_print_temp_pause_owned = False
+        self._v2_print_temp_user_override = False
+        for idx, task in paused.items():
+            if not self._is_v2_idx(idx) or not self._connected_per_ace.get(idx, False):
+                continue
+            is_auto = bool(task.get('auto'))
+            params = {'temp': task['temp'], 'duration': task['duration']}
+            method = 'drying_raw' if is_auto else 'drying'
+            if is_auto:
+                params['auto_roll'] = True
+            else:
+                params['fan_speed'] = 7000
+            def callback(self, response, _idx=idx, _auto=is_auto,
+                         _temp=task['temp'], _duration=task['duration']):
+                if response and response.get('code', -1) == 0:
+                    if _auto:
+                        self._v2_auto_dry_active.add(_idx)
+                        self._v2_fan_running[_idx] = True
+                        self._set_v2_exhaust(_idx, True, require_dryer=True)
+                    else:
+                        self._remember_v2_manual_dry(
+                            _idx, _temp, _duration)
+                        self._v2_fan_running[_idx] = True
+                        self._set_v2_exhaust(_idx, True, require_dryer=True)
+            try:
+                self.send_request_to(idx, {'method': method, 'params': params}, callback)
+                self.log_always('[multiACE] Resumed ACE%s %s drying after print'
+                                % (self._disp(idx), 'auto' if is_auto else 'manual'))
+            except Exception as e:
+                logging.info('[multiACE] print-end dryer resume ACE %d failed: %s', idx, e)
 
     def _v2_print_guard_tick(self, eventtime):
         try:
-            state = self._print_stats_state()
-            if state == 'printing':
-                self._pause_for_v2_overtemp('print_guard')
-                return eventtime + 0.5
-            if state not in ('paused',):
-                self._v2_print_guard_paused = False
+            if self._is_printing_or_paused():
+                self._pause_hot_v2_dryers_for_print()
         except Exception as e:
-            logging.info('[multiACE] print-temp guard failed: %s' % e)
+            logging.info('[multiACE] print temperature guard failed: %s', e)
         return eventtime + 0.5
 
     def _on_print_task_start(self, *args):
-        self._pause_for_v2_overtemp('new_task_start')
+        self._begin_print_temperature_policy()
 
     def _v2_auto_dry_tick(self, eventtime):
         interval = self._v2_auto_dry_check_interval
         try:
-            if self._is_printing_or_paused():
-                for idx in list(self._v2_auto_dry_active):
-                    self._stop_v2_auto_dry(idx, 'printing')
-                return eventtime + interval
-
-            saw_humidity = False
             for idx in range(len(self._ace_devices)):
+                if self._v2_print_start_temp_block:
+                    continue
+                if idx in self._v2_dry_paused_by_print:
+                    continue
                 if not self._v2_auto_dry_enabled.get(idx, False):
                     self._stop_v2_auto_dry(idx, 'disabled')
                     continue
                 if not self._is_v2_idx(idx) or not self._connected_per_ace.get(idx, False):
                     continue
-                info = self._info_per_ace.get(idx) or {}
+                # A manual cycle owns the ACE dryer until its duration ends;
+                # automatic humidity checks must not start/stop it.
+                if idx in self._v2_manual_dry_active:
+                    continue
                 try:
-                    humidity = float(info.get('humidity'))
+                    humidity = float((self._info_per_ace.get(idx) or {}).get('humidity'))
                 except (TypeError, ValueError):
                     continue
-                saw_humidity = True
-                dryer = info.get('dryer_status', {}) or {}
-                dryer_running = dryer.get('status') not in (
-                    None, '', 'stop', 'free')
-                start_h = self._v2_auto_dry_start_humidity.get(
-                    idx, self._v2_auto_dry_default_start_humidity)
-                stop_h = self._v2_auto_dry_stop_humidity.get(
-                    idx, self._v2_auto_dry_default_stop_humidity)
+                dryer = (self._info_per_ace.get(idx) or {}).get('dryer_status', {}) or {}
+                running = dryer.get('status') not in (None, '', 'stop', 'free')
+                start = self._v2_auto_dry_start_humidity[idx]
+                stop = self._v2_auto_dry_stop_humidity[idx]
                 if idx in self._v2_auto_dry_active:
-                    if humidity <= stop_h:
+                    if humidity <= stop:
+                        # Stop only an active cycle when the chamber reaches
+                        # the configured stop humidity.
                         self._stop_v2_auto_dry(idx, 'humidity_reached')
-                    elif not dryer_running:
+                    elif not running and humidity >= start:
                         self._v2_auto_dry_active.discard(idx)
-                        if humidity >= start_h:
-                            self._start_v2_auto_dry(idx, humidity)
-                    continue
-                if dryer_running:
-                    continue
-                if humidity >= start_h:
+                        self._start_v2_auto_dry(idx, humidity)
+                elif not running and humidity >= start:
+                    # Start only when humidity reaches the configured start
+                    # threshold. Values already below it must stay stopped.
                     self._start_v2_auto_dry(idx, humidity)
-            if not saw_humidity:
-                return eventtime + min(10.0, interval)
         except Exception as e:
-            logging.info('[multiACE] auto-dry tick failed: %s' % e)
+            logging.info('[multiACE] auto-dry tick failed: %s', e)
         return eventtime + interval
 
     def _schedule_v2_auto_dry_check(self):
@@ -2252,15 +1802,22 @@ class MultiAce:
         if self._v2_auto_dry_timer is None:
             self._v2_auto_dry_timer = self.reactor.register_timer(
                 self._v2_auto_dry_tick, eventtime)
-            return
-        update_timer = getattr(self.reactor, 'update_timer', None)
-        if update_timer is not None:
-            update_timer(self._v2_auto_dry_timer, eventtime)
-            return
-        self._v2_auto_dry_tick(eventtime)
+        else:
+            self.reactor.update_timer(self._v2_auto_dry_timer, eventtime)
 
     def _handle_ready(self):
         self.toolhead = self.printer.lookup_object('toolhead')
+
+        if self.stall_watchdog and getattr(self, '_watchdog_timer', None) is None:
+            self._watchdog_next = None
+            self._watchdog_gen2 = None
+            self._watchdog_timer = self.reactor.register_timer(
+                self._reactor_stall_watchdog, self.reactor.NOW)
+
+        if self.airlog_enable and getattr(self, '_airlog_timer', None) is None:
+            self._airlog_state = None
+            self._airlog_timer = self.reactor.register_timer(
+                self._airlog_tick, self.reactor.NOW)
 
         if V2_FEED_LOG and self._feedlog_timer is None:
             self._feedlog.info(
@@ -2269,29 +1826,17 @@ class MultiAce:
                 'ratio=ddec/dext) ===' % V2_FEED_LOG_INTERVAL)
             self._feedlog_timer = self.reactor.register_timer(
                 self._feedlog_tick, self.reactor.NOW)
-        if ((self._v2_feed_watchdog_enabled
-                or self._v2_toolhead_jam_watchdog)
-                and self._feed_watchdog_timer is None):
-            self._feedlog.info(
-                '=== feed watchdog START interval=%.1fs min_ext=%.1fmm '
-                'max_stalls=%d cooldown=%.1fs buffer_slack=%.1fmm ==='
-                % (self._v2_feed_watchdog_interval,
-                   self._v2_feed_watchdog_min_extrude,
-                   self._v2_feed_watchdog_max_stalls,
-                   self._v2_feed_watchdog_cooldown,
-                   self._v2_feed_watchdog_buffer_slack))
-            self._feed_watchdog_timer = self.reactor.register_timer(
-                self._feed_watchdog_tick,
-                self.reactor.monotonic() + self._v2_feed_watchdog_interval)
 
         if self._v2_auto_dry_timer is None:
             self._v2_auto_dry_timer = self.reactor.register_timer(
-                self._v2_auto_dry_tick,
-                self.reactor.monotonic() + 5.0)
+                self._v2_auto_dry_tick, self.reactor.monotonic() + 5.0)
         if self._v2_print_guard_timer is None:
             self._v2_print_guard_timer = self.reactor.register_timer(
-                self._v2_print_guard_tick,
-                self.reactor.monotonic() + 0.5)
+                self._v2_print_guard_tick, self.reactor.monotonic() + 0.5)
+        if self._head_mapping_monitor_timer is None:
+            self._head_mapping_monitor_timer = self.reactor.register_timer(
+                self._head_mapping_monitor_tick,
+                self.reactor.monotonic() + HEAD_MAPPING_MONITOR_INTERVAL)
 
         self._clear_homing_flag()
         self._spawn_multiace_web()
@@ -2314,6 +1859,15 @@ class MultiAce:
                             '[multiACE] suppressing RFID clear on channel %d '
                             '(mode=%s, multiACE manages)' % (channel, self._ace_mode))
                         return
+                    mt = (info.get('MAIN_TYPE') or '').strip()
+                    if not is_clear and mt and mt != 'NONE':
+                        nv = self._norm_vendor_push(info.get('VENDOR'))
+                        ns = self._norm_subtype_push(info.get('SUB_TYPE'))
+                        if (nv != info.get('VENDOR')
+                                or ns != info.get('SUB_TYPE')):
+                            info = dict(info)
+                            info['VENDOR'] = nv
+                            info['SUB_TYPE'] = ns
                     return _orig(channel, info, is_clear)
                 cbs = getattr(fd, '_notify_data_update_cb', None)
                 if isinstance(cbs, list):
@@ -2333,6 +1887,9 @@ class MultiAce:
             self._orig_set_ptc = self.gcode.register_command(
                 'SET_PRINT_FILAMENT_CONFIG', None)
             if self._orig_set_ptc is not None:
+                _ptc = self.printer.lookup_object('print_task_config', None)
+                self._raw_set_ptc = getattr(
+                    _ptc, 'cmd_SET_PRINT_FILAMENT_CONFIG', None)
                 self.gcode.register_command(
                     'SET_PRINT_FILAMENT_CONFIG',
                     self._wrap_set_print_filament_config,
@@ -2362,10 +1919,25 @@ class MultiAce:
         logging.info('[multiACE] Version %s (%s) build=%s file=%s' % (
             MULTIACE_VERSION, MULTIACE_CODENAME, MULTIACE_BUILD_TAG, ace_timestamp))
 
+        try:
+            _bg = self.printer.lookup_object('ace_bg_swap', None)
+            if _bg is not None:
+                _bg_heads = sorted(getattr(_bg, 'enabled_heads', []) or [])
+                self.log_always('[multiACE] bg-swap %s: enabled heads %s'
+                                % (getattr(_bg, 'version', '?'),
+                                   _bg_heads if _bg_heads else 'NONE'))
+            else:
+                logging.info('[multiACE] bg-swap: not loaded '
+                             '(no [ace_bg_swap] section)')
+        except Exception as e:
+            logging.info('[multiACE] bg-swap banner failed: %s' % e)
+
         self._ace_mode = 'normal'
         if self.save_variables:
             self._ace_mode = self.save_variables.allVariables.get('ace__mode', 'normal')
             self._restore_head_manual()
+            self._restore_head_feeder()
+            self._restore_head_ace()
         if self._ace_mode == 'normal':
             logging.info('[multiACE] Normal mode - skipping ACE detection')
             return
@@ -2377,7 +1949,7 @@ class MultiAce:
             logging.info('[multiACE] %s mode - no head_source tracking'
                          % self._ace_mode)
 
-        self._sync_stock_entangle_detect()
+        self._disable_stock_entangle_detect()
 
         self._wrap_resume_command()
 
@@ -2576,16 +2148,23 @@ class MultiAce:
         """
         if any(self._head_source.get(h) is not None for h in range(4)):
             return
-        ace_idx = self._active_device_index
-        info = self._info_per_ace.get(ace_idx) or {}
-        slots_by_index = {s.get('index', n): s
-                          for n, s in enumerate(info.get('slots') or [])
-                          if isinstance(s, dict)}
+        head_mode = getattr(self, '_ace_mode', 'multi') == 'head'
+        active_idx = self._active_device_index
         lines = []
-        for slot_idx in range(4):
-            if not self.head_uses_ace(slot_idx):
-
+        for head in range(4):
+            if not self.head_uses_ace(head):
                 continue
+            ace_idx = active_idx
+            slot_idx = head
+            if head_mode:
+                ace_idx = self.head_ace_for(head)
+                _s = self._first_loaded_slot_for_ace(ace_idx)
+                if _s is not None:
+                    slot_idx = _s
+            info = self._info_per_ace.get(ace_idx) or {}
+            slots_by_index = {s.get('index', n): s
+                              for n, s in enumerate(info.get('slots') or [])
+                              if isinstance(s, dict)}
             ov = self._slot_overrides.get('%d_%d' % (ace_idx, slot_idx)) or {}
             s = slots_by_index.get(slot_idx) or {}
             mat = (ov.get('material') or s.get('material')
@@ -2604,18 +2183,20 @@ class MultiAce:
             push_vendor = brand if brand else 'NONE'
             push_color = (color + 'FF') if color else '000000FF'
             push_subtype = sub
-            self._expect_ptc_push(slot_idx, push_type, push_color,
+            self._expect_ptc_push(head, push_type, push_color,
                                   push_vendor, push_subtype)
             lines.append(
                 'SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER=%d '
                 'FILAMENT_TYPE="%s" FILAMENT_COLOR_RGBA=%s '
                 'VENDOR="%s" FILAMENT_SUBTYPE="%s"' % (
-                    slot_idx, push_type, push_color, push_vendor, push_subtype))
+                    head, push_type, push_color, push_vendor, push_subtype))
+        if not lines:
+            return
         try:
             self.gcode.run_script_from_command('\n'.join(lines))
             logging.info(
-                '[multiACE] PTC sync -> ACE %d (4 slots, all heads empty)'
-                % ace_idx)
+                '[multiACE] PTC sync -> per-head (all heads empty, head_mode=%s)'
+                % head_mode)
         except Exception as e:
             logging.info('[multiACE] PTC sync failed: %s' % e)
 
@@ -2647,11 +2228,269 @@ class MultiAce:
         vstate = self._v2_velocity_state.get(idx) or {}
         return (vstate.get('last_slot_statuses') or {}).get(slot)
 
+    def _v2_any_slot_active(self, idx):
+        """True if any slot on this V2 is in a real motor motion (feeding a
+        spool to the gate on insert, unloading, rolling back) - i.e. the
+        device is LEGITIMATELY busy, not hung/stale. Device-truth via
+        _v2_get_slot_status (the same source get_status reports 'busy' from)."""
+        if not self._is_v2_idx(idx):
+            return False
+        for s in range(4):
+            if self._v2_get_slot_status(idx, s) in V2_ACTIVE_MOTION_STATES:
+                return True
+        return False
+
+    def _is_actively_printing(self):
+        """True only while a print is actively running (print_stats 'printing').
+        A paused/idle print is NOT actively printing - the same distinction the
+        pre-load suppression uses (defer feeding a freshly-inserted spool until
+        the ACE motor is not needed for the live print)."""
+        ps = self.printer.lookup_object('print_stats', None)
+        return ps is not None and getattr(ps, 'state', '') == 'printing'
+
+    def _read_decoder(self, idx, slot):
+        """[diag] Synchronous V2 decoder read (get_feed_info -> per-slot
+        'decoder' = REAL filament movement, HW-proven). Returns int or None
+        (V2-only; a V1 has no feed_info). Safe from a gcode/greenlet context:
+        reactor.pause yields to the reader for the one response, like the
+        whole-print logger's async read but blocking. Used only for the
+        passive unload-retract decoder logging - no control depends on it."""
+        try:
+            if not self._is_v2_idx(idx):
+                return None
+        except Exception:
+            return None
+        box = {'d': None, 'done': False}
+        def _cb(self, response, _b=box, _slot=slot):
+            try:
+                fi = ((response or {}).get('result') or {}).get(
+                    'feed_info') or []
+                for s in fi:
+                    if s.get('index') == _slot:
+                        _dv = int(s.get('decoder', 0))
+                        if _dv >= (1 << 63):
+                            _dv -= (1 << 64)
+                        _b['d'] = _dv
+                        break
+            except Exception:
+                pass
+            _b['done'] = True
+        try:
+            self.send_request_to(idx, {'method': 'get_feed_info'}, _cb)
+        except Exception:
+            return None
+        deadline = self.reactor.monotonic() + 1.0
+        while not box['done'] and self.reactor.monotonic() < deadline:
+            self.reactor.pause(self.reactor.monotonic() + 0.02)
+        return box['d']
+
+    def _retract_with_decoder_span(self, idx, slot, retract_fn):
+        """[diag] Run retract_fn() while sampling the V2 decoder every ~100ms
+        (async get_feed_info in a reactor timer, like _feedlog_tick - ace.dwell
+        yields so the timer fires DURING the retract). Returns (span, n, dmin,
+        dmax) signed. SPAN = max-min is base-agnostic: it catches a real stall
+        regardless of the decoder's per-command reset/hold, which a before/after
+        delta cannot (HW 2026-07-09: delta=d1-d0 read a full-movement retry as
+        '0' because d0 held the prior command's value). V2-only; on a V1 it just
+        runs retract_fn."""
+        try:
+            is_v2 = self._is_v2_idx(idx)
+        except Exception:
+            is_v2 = False
+        if not is_v2:
+            retract_fn()
+            return (None, 0, None, None)
+        box = {'min': None, 'max': None, 'n': 0}
+        def _cb(self, response, _b=box, _slot=slot):
+            try:
+                fi = ((response or {}).get('result') or {}).get(
+                    'feed_info') or []
+                for s in fi:
+                    if s.get('index') == _slot:
+                        dv = int(s.get('decoder', 0))
+                        if dv >= (1 << 63):
+                            dv -= (1 << 64)
+                        _b['min'] = dv if _b['min'] is None else min(_b['min'], dv)
+                        _b['max'] = dv if _b['max'] is None else max(_b['max'], dv)
+                        _b['n'] += 1
+                        break
+            except Exception:
+                pass
+        def _tick(eventtime, _idx=idx):
+            try:
+                self.send_request_to(_idx, {'method': 'get_feed_info'}, _cb)
+            except Exception:
+                pass
+            return eventtime + 0.25
+        timer = self.reactor.register_timer(_tick, self.reactor.NOW)
+        try:
+            retract_fn()
+        finally:
+            try:
+                self.reactor.unregister_timer(timer)
+            except Exception:
+                pass
+        span = None if box['min'] is None else (box['max'] - box['min'])
+        return (span, box['n'], box['min'], box['max'])
+
     def _clear_fa_cache_for(self, idx, slot):
         if self._feed_assist_per_ace.get(idx, -1) == slot:
             self._feed_assist_per_ace[idx] = -1
         if idx == self._active_device_index and self._feed_assist_index == slot:
             self._feed_assist_index = -1
+
+    def _fa_rearm_backoff_ok(self, idx, slot):
+        """Back-off gate for the V2 FA re-arm churn (FA_REARM_MAX_FAILS, see the
+        constant's note). Called as the LAST guard of each re-arm branch in the
+        velocity tick, so it only counts an attempt that would otherwise re-arm.
+        Returns True to proceed (log + schedule), False when the slot is
+        suspended (caller skips both). A reconnect's transient dropped arms are
+        allowed but NOT counted - the deliberate post-handshake re-arm sticks.
+
+        ACE2 Pro can report assist_error repeatedly during the printer's flow
+        calibration. Its deliberately slow, pulsed extrusion does not satisfy
+        the ACE firmware's normal assist-motion check. Those errors are not
+        evidence of a cut filament, so they must not consume the lifetime retry
+        budget and leave feed assist suspended for the real print."""
+        key = (idx, slot)
+        if self._is_flow_calibrating():
+            self._fa_rearm_fails.pop(key, None)
+            self._fa_rearm_suspended.discard(key)
+            return True
+        if key in self._fa_rearm_suspended:
+            return False
+        if (self._reconnecting_per_ace.get(idx, False)
+                or self._serial_failed_per_ace.get(idx, False)):
+            return True
+        n = self._fa_rearm_fails.get(key, 0) + 1
+        self._fa_rearm_fails[key] = n
+        if n >= FA_REARM_MAX_FAILS:
+            self._fa_rearm_suspended.add(key)
+            self._fa_log.warning(
+                '[v2-recover] FA re-arm not sticking on ACE %d slot %d after '
+                '%d tries (device keeps disarming - cut/absent filament? a '
+                'mid-bowden cut is invisible to the gate + toolhead sensors) - '
+                'SUSPENDING re-arm until tool change / extrusion resume / '
+                'reconnect' % (idx, slot, n))
+            return False
+        return True
+
+    def _fa_rearm_reset(self, idx, slot=None):
+        """Clear the FA re-arm back-off counter + suspend flag. slot=None clears
+        every slot of idx (reconnect / print start); a slot clears just that one
+        (a stick on that slot / a tool change onto it)."""
+        if slot is None:
+            for k in [k for k in self._fa_rearm_fails if k[0] == idx]:
+                self._fa_rearm_fails.pop(k, None)
+            for k in [k for k in self._fa_rearm_suspended if k[0] == idx]:
+                self._fa_rearm_suspended.discard(k)
+        else:
+            self._fa_rearm_fails.pop((idx, slot), None)
+            self._fa_rearm_suspended.discard((idx, slot))
+
+    def _on_flow_calibration_begin(self, *args):
+        """Keep ACE2 feed assist recoverable during slow/pulsed calibration."""
+        self._flow_calibrating = True
+        self._fa_rearm_fails.clear()
+        self._fa_rearm_suspended.clear()
+        self._fa_log.info(
+            '[v2-recover] flow calibration began - transient assist_error '
+            'will not suspend feed-assist re-arm')
+
+    def _is_flow_calibrating(self):
+        """Return the official calibration state even when its event was
+        emitted before ace.py was registered. Snapmaker keeps the authoritative
+        flag on the active extruder; relying on our event handler alone lets a
+        slow calibration pulse exhaust the V2 FA retry budget.
+        """
+        if self._flow_calibrating:
+            return True
+        try:
+            extruder = self.toolhead.get_extruder()
+            return bool(getattr(extruder, 'is_calibrating_flow', False))
+        except Exception:
+            return False
+
+    def _on_flow_calibration_end(self, *args):
+        """Drop calibration-only retry state and restore the active print FA."""
+        was_calibrating = self._flow_calibrating
+        self._flow_calibrating = False
+        if not was_calibrating:
+            return
+        self._fa_rearm_fails.clear()
+        self._fa_rearm_suspended.clear()
+        self._fa_log.info(
+            '[v2-recover] flow calibration ended - retry state reset')
+        if not self._auto_feed_enabled or self._fa_context != 'print':
+            return
+        try:
+            cur_ext = self.toolhead.get_extruder()
+            head = getattr(cur_ext, 'extruder_index',
+                           getattr(cur_ext, 'extruder_num', None))
+            source = self._head_source.get(head) if head is not None else None
+        except Exception:
+            source = None
+        if source is None:
+            return
+        idx = source.get('ace_index')
+        slot = source.get('slot')
+        if idx is None or slot is None or not self._is_v2_idx(idx):
+            return
+        if self._v2_get_slot_status(idx, slot) in V2_FA_RUNNING_STATES:
+            return
+        self._v2_schedule_fa_rearm(
+            idx, slot, 'flow-calibration-end')
+
+    def _v1_check_fa_health(self, idx, result):
+        """LOG-ONLY V1 FA diagnosis (predicate HW-DISPROVED 2026-07-06).
+        The original idea: V1 reports a GLOBAL cont_assist_time and assists one
+        slot at a time, so "armed but cont_assist_time==0" = dropped FA ->
+        re-arm. The USB-pull test print disproved it: cont_assist_time stayed
+        0.0 and feed_assist_count static over 31 forced re-arms while FA
+        demonstrably ran - the fields are NOT runtime truth on this firmware.
+        Now gated off by default (v1_fa_monitor False) and, when enabled,
+        LOGS the would-be trigger without re-arming. Do not re-introduce a
+        re-arm here without a NEW hardware signal."""
+        if not self.v1_fa_monitor:
+            return
+        if self._fa_context != 'print' or not self._auto_feed_enabled:
+            self._v1_fa_notassist_streak[idx] = 0
+            return
+        if self._swap_in_progress or getattr(self, '_v2_active_rev_assist', False):
+            return
+        if self._reconnecting_per_ace.get(idx, False):
+            return
+        if idx in self._fa_print_disable:
+            return
+        slot = self._feed_assist_per_ace.get(idx, -1)
+        if slot is None or slot < 0:
+            self._v1_fa_notassist_streak[idx] = 0
+            return
+        _fa_head = (self._head_for_ace(idx)
+                    if getattr(self, '_ace_mode', 'multi') == 'head' else slot)
+        if _fa_head is not None and self.head_is_manual(_fa_head):
+            self._v1_fa_notassist_streak[idx] = 0
+            return
+        cont = result.get('cont_assist_time')
+        fac = result.get('feed_assist_count')
+        assisting = isinstance(cont, (int, float)) and cont > 0
+        if assisting:
+            self._v1_fa_notassist_streak[idx] = 0
+            return
+        streak = self._v1_fa_notassist_streak.get(idx, 0) + 1
+        self._v1_fa_notassist_streak[idx] = streak
+        if streak < V1_FA_CONFIRM_TICKS:
+            return
+        now = time.monotonic()
+        if now - self._v1_fa_last_rearm.get(idx, 0.0) < V1_FA_REARM_MIN_INTERVAL:
+            return
+        self._v1_fa_last_rearm[idx] = now
+        self._v1_fa_notassist_streak[idx] = 0
+        self._fa_log.info(
+            '[v1-recover] ACE %d slot %d armed but not assisting '
+            '(cont_assist_time=%s feed_assist_count=%s) - LOG-ONLY, '
+            'predicate HW-disproved, no re-arm'
+            % (idx, slot, cont, fac))
 
     def _v2_schedule_fa_rearm(self, idx, slot, reason, delay=0.05):
         """Deferred, guarded FA re-arm for a V2 head whose host cache may be
@@ -2696,7 +2535,7 @@ class MultiAce:
                     idx, slot, reason, status if status is not None else 'unknown'))
             self._clear_fa_cache_for(idx, slot)
             try:
-                self._arm_fa_for(idx, slot)
+                self._arm_fa_for(idx, slot, from_recovery=True)
             except Exception as e:
                 logging.info('[multiACE] V2 FA rearm failed: %s' % e)
             return self.reactor.NEVER
@@ -2704,28 +2543,35 @@ class MultiAce:
         self.reactor.register_timer(_rearm, self.reactor.monotonic() + delay)
         return True
 
+    def _sniff_print_gcode_loads(self):
+        try:
+            vsd = self.printer.lookup_object('virtual_sdcard', None)
+            f = getattr(vsd, 'current_file', None)
+            path = getattr(f, 'name', None) if f is not None else None
+            if not path:
+                fp = getattr(vsd, 'file_path', None)
+                path = fp() if callable(fp) else None
+            if not path:
+                return False
+            with open(path, 'r', encoding='utf-8', errors='replace') as fh:
+                head = fh.read(512 * 1024)
+            if '; multiACE auto-load:' in head:
+                return True
+            if head.startswith('ACE_SWAP_HEAD ') or '\nACE_SWAP_HEAD ' in head:
+                return True
+            return False
+        except Exception as e:
+            logging.info('[multiACE] gcode load-sniff failed: %s' % e)
+            return False
+
     def _on_print_start(self, *args):
         self._print_job_active = True
         self._print_end_unload_pending = False
-        try:
-            self.gcode.run_script_from_command(
-                'SET_GCODE_VARIABLE MACRO=MAKERDAD_STARTUP_PURGE '
-                'VARIABLE=done VALUE=False')
-        except Exception as e:
-            logging.info('[multiACE] startup-purge reset failed: %s' % e)
-        self._stop_all_v2_auto_dry('print_start')
-        self._feed_watchdog_last.clear()
-        self._feed_watchdog_bad.clear()
-        self._feed_watchdog_rearm_pending.clear()
-        self._feed_watchdog_assist_origin.clear()
-        self._feed_watchdog_outer_since.clear()
-        self._feed_watchdog_seen_mileage.clear()
-        self._feed_watchdog_soft_warned.clear()
-        self._feed_watchdog_no_baseline.clear()
-        self._feed_watchdog_paused.clear()
-        self._toolhead_jam_watchdog.clear()
-        self._feed_watchdog_print_start_ts = self.reactor.monotonic()
-        if self._ace_mode == 'multi':
+        self._begin_print_temperature_policy()
+        self._print_has_gcode_loads = self._sniff_print_gcode_loads()
+        logging.info('[multiACE] print gcode carries multiACE loads: %s'
+                     % self._print_has_gcode_loads)
+        if self._ace_mode in ('multi', 'head'):
 
             self._ghost_heads = set()
             stale_heads = []
@@ -2739,7 +2585,7 @@ class MultiAce:
                 detected = sensor.get_status(0)['filament_detected']
                 src = self._head_source.get(head)
                 if detected and src is None:
-                    if self.head_is_manual(head):
+                    if not self.head_uses_ace(head):
                         manual_loaded_heads.append(head)
                     else:
                         ghost_heads.append(head)
@@ -2762,10 +2608,49 @@ class MultiAce:
             if manual_loaded_heads:
                 head_list = ', '.join('T%d' % h for h in manual_loaded_heads)
                 self.log_always(
-                    '[multiACE] Manual head(s): %s have filament at the '
-                    'toolhead sensor (hand-loaded, no ACE source - expected). '
-                    'ACE_SWAP_HEAD will be refused for these heads.'
+                    '[multiACE] Manual/feeder head(s): %s have filament at the '
+                    'toolhead sensor (hand-loaded or stock-fed, no ACE source - '
+                    'expected). ACE_SWAP_HEAD will be refused for these heads.'
                     % head_list)
+
+            seen_slots = {}
+            dup = []
+            mismatched = []
+            for head in range(4):
+                src = self._head_source.get(head)
+                if src is None or not self.head_uses_ace(head):
+                    continue
+                key = (src.get('ace_index'), src.get('slot'))
+                if key in seen_slots:
+                    dup.append((seen_slots[key], head, src.get('slot')))
+                else:
+                    seen_slots[key] = head
+                if self._ace_mode == 'multi' and src.get('slot') != head:
+                    mismatched.append((head, src.get('slot')))
+            dup_ace = []
+            if self._ace_mode == 'head':
+                seen_aces = {}
+                for head in range(4):
+                    src = self._head_source.get(head)
+                    if src is None or not self.head_uses_ace(head):
+                        continue
+                    a = src.get('ace_index')
+                    if a in seen_aces:
+                        dup_ace.append((seen_aces[a], head, a))
+                    else:
+                        seen_aces[a] = head
+            if dup or mismatched or dup_ace:
+                parts = ['T%s+T%s->slot %s' % (self._disp(a), self._disp(b),
+                         self._disp(s)) for a, b, s in dup]
+                parts += ['T%s->slot %s' % (self._disp(h), self._disp(s))
+                          for h, s in mismatched]
+                parts += ['T%s+T%s->ACE %s' % (self._disp(a), self._disp(b),
+                          self._disp(x)) for a, b, x in dup_ace]
+                self.log_error(self._t('msg.head_source_inconsistent',
+                    detail=', '.join(parts)))
+                self.reactor.register_async_callback(
+                    lambda et: self.gcode.run_script_from_command('CANCEL_PRINT'))
+                return
 
             for head in range(4):
                 source = self._head_source.get(head)
@@ -2780,21 +2665,68 @@ class MultiAce:
                 if not self._connected_per_ace.get(ace_idx, False):
                     self.log_error(self._t('msg.print_start_head_needs_disconnected',
                         head=self._disp(head), ace=self._disp(ace_idx)))
+        self._auto_feed_enabled = True
+        self._fa_context = 'print'
         self._serial_failed_pause_sent = False
+        self._fa_failed_pause_sent = False
+        self._fa_rearm_fails.clear()
+        self._fa_rearm_suspended.clear()
+        # A synchronous USB reopen here runs inside the printer resume path.
+        # On multi-MCU Snapmaker firmware that can consume the timing margin
+        # and trigger the fatal "Timer too close" shutdown. Reopen after the
+        # resume macro has restored the MCU schedule instead.
+        self._schedule_reopen_failed_aces_on_resume()
+        self._runout_suppress_heads = set()
+        self._resume_wipe_deadline = (self.reactor.monotonic()
+                                      + RESUME_NOOP_WIPE_WINDOW)
+        logging.info('[multiACE] Print started - auto-feed enabled')
+        self._fa_trace('gate OPEN (context=print) via _on_print_start')
 
-        # print_stats:start is raised as soon as the job begins, while the
-        # stock U1 preamble is still probing the plate and tool carrier.  ACE
-        # commands in that window can delay the motion reactor enough to trip
-        # the MCU's "Timer too close" protection.  The stock
-        # SM_PRINT_AUTO_FEED path opens the gate when material actually needs
-        # moving; it promotes the gate to print mode after a successful load.
-        self._auto_feed_enabled = False
-        self._fa_context = 'idle'
-        logging.info('[multiACE] Print started - feed assist deferred until auto-feed')
-        self._fa_trace('gate CLOSED at print start; wait for SM_PRINT_AUTO_FEED')
-        self._audit_state('PRINT_START', {
-            'action': 'feed_assist_deferred',
-        })
+        try:
+            extruder = self.toolhead.get_extruder()
+            head_index = getattr(extruder, 'extruder_index',
+                        getattr(extruder, 'extruder_num', None))
+        except Exception:
+            head_index = None
+        if head_index is None:
+            return
+        source = self._head_source.get(head_index)
+        if source is None:
+            return
+        if not self.head_uses_ace(head_index):
+            return
+        target_ace = source['ace_index']
+        target_slot = source['slot']
+        if target_ace >= len(self._ace_devices):
+            return
+        if not self._connected_per_ace.get(target_ace, False):
+            self._audit_state('PRINT_START', {
+                'head': head_index,
+                'target_ace': target_ace,
+                'action': 'ace_not_connected',
+            })
+            return
+
+        if self._active_device_index != target_ace:
+            self._set_active_idx(target_ace)
+        try:
+            self._arm_fa_for(target_ace, target_slot)
+            self.log_always(self._t('msg.print_start_fa_enabled',
+                ace=self._disp(target_ace), slot=self._disp(target_slot),
+                head=self._disp(head_index)))
+            self._audit_state('PRINT_START', {
+                'head': head_index,
+                'target_ace': target_ace,
+                'target_slot': target_slot,
+                'action': 'feed_assist_enabled',
+            })
+        except Exception as e:
+            logging.info('[multiACE] print-start feed_assist enable failed: %s' % e)
+            self._audit_state('PRINT_START', {
+                'head': head_index,
+                'action': 'feed_assist_enable_failed',
+                'error': str(e)[:200],
+            })
 
     def _run_print_end_unload(self, eventtime):
         self._print_end_unload_pending = False
@@ -2804,29 +2736,20 @@ class MultiAce:
             logging.info('[multiACE] print-end unload skipped: print is not complete')
             return self.reactor.NEVER
         try:
-            self.log_always('[multiACE] Print complete - unloading ACE-backed toolheads')
+            self.log_always(self._t('msg.print_end_unload_start'))
             self.gcode.run_script_from_command('ACE_UNLOAD_ALL_HEADS')
         except Exception as e:
-            logging.info('[multiACE] print-end unload failed: %s' % e)
-            self.log_error('[multiACE] Print-end unload failed: %s' % e)
+            logging.info('[multiACE] print-end unload failed: %s', e)
+            self.log_error(self._t('msg.print_end_unload_failed', error=str(e)))
         return self.reactor.NEVER
 
     def _on_print_end(self, *args):
         had_active_print = self._print_job_active
         self._print_job_active = False
+        self._resume_v2_dryers_after_print()
         self._auto_feed_enabled = False
         self._fa_context = 'idle'
-        self._feed_watchdog_last.clear()
-        self._feed_watchdog_bad.clear()
-        self._feed_watchdog_rearm_pending.clear()
-        self._feed_watchdog_assist_origin.clear()
-        self._feed_watchdog_outer_since.clear()
-        self._feed_watchdog_print_start_ts = 0.0
-        self._feed_watchdog_seen_mileage.clear()
-        self._feed_watchdog_soft_warned.clear()
-        self._feed_watchdog_no_baseline.clear()
-        self._feed_watchdog_paused.clear()
-        self._toolhead_jam_watchdog.clear()
+        self._runout_suppress_heads = set()
         logging.info('[multiACE] Print ended - auto-feed disabled')
         self._fa_trace('gate CLOSE (context=idle) via _on_print_end')
         stopped_any = False
@@ -2875,6 +2798,7 @@ class MultiAce:
 
     def log_error(self, msg):
         self.error_msg = msg
+        logging.error(msg)
         self.gcode.respond_raw(f"!! {msg}")
 
     def _restore_pos_for_pause(self, saved_pos):
@@ -2918,7 +2842,6 @@ class MultiAce:
                 % (orig_ext_name, e))
 
     def _restore_machine_state_for_resume(self):
-
         try:
             ps = self.printer.lookup_object('print_stats', None)
             if ps is not None:
@@ -2935,7 +2858,6 @@ class MultiAce:
             if cur == 'PRINTING':
                 return
             if cur != 'IDLE':
-
                 self.gcode.run_script_from_command(
                     'SET_MAIN_STATE MAIN_STATE=IDLE ACTION=IDLE')
             self.gcode.run_script_from_command('SET_MAIN_STATE MAIN_STATE=PRINTING')
@@ -2948,7 +2870,6 @@ class MultiAce:
                 '[multiACE] recovery: machine_state restore failed: %s' % e)
 
     def _wrap_resume_command(self):
-
         for name in ('RESUME', '_RESUME_BASE'):
             try:
                 prev = self.gcode.register_command(name, None)
@@ -2973,24 +2894,67 @@ class MultiAce:
                     pass
 
     def _make_resume_wrap(self, prev, name):
-
         def _wrap(gcmd):
             try:
                 self._restore_machine_state_for_resume()
             except Exception as e:
                 logging.info('[multiACE] %s wrap: machine_state restore '
                              'failed: %s' % (name, e))
-            try:
-                self._force_rearm_print_assist(
-                    reason='%s-wrap' % name, wait=0.0, clear_all=True)
-            except Exception as e:
-                logging.info('[multiACE] %s wrap: FA rearm failed: %s'
-                             % (name, e))
             prev(gcmd)
         return _wrap
 
-    def _pause_for_recovery(self, gcmd, detail_msg, recovery_steps, code=0):
+    def _load_slip_details(self, head, ace_index, slot):
+        """Classify a failed ACE load into its two REAL modes and return
+        (detail_msg, recovery_steps) for _pause_for_recovery. Used by the
+        swap path and by the direct feed path in filament_feed_ace, so both
+        word the same failure identically.
 
+        The old single 'Load slip ... unload, reload, RESUME' message hid two
+        unrelated failures: sensor clear = the filament NEVER REACHED the
+        toolhead (no transport - spool/bowden/ACE problem; unload+reload is
+        the right recovery) vs sensor present = the filament arrived and was
+        gripped but the nozzle does not extrude (no flow - a clog; unload+
+        reload cannot fix it and points the user at the wrong end). The
+        toolhead sensor alone discriminates cleanly; the raw feed error stays
+        in klippy.log. Fail-open to the transport wording if the sensor
+        cannot be read."""
+        arrived = False
+        try:
+            sensor = self.printer.lookup_object(
+                'filament_motion_sensor e%d_filament' % head, None)
+            if sensor is not None:
+                arrived = bool(sensor.get_status(0)['filament_detected'])
+        except Exception:
+            arrived = False
+        if arrived:
+            detail = self._t('msg.pause_swap_load_no_flow',
+                head=self._disp(head), ace=self._disp(ace_index),
+                slot=self._disp(slot))
+            steps = [
+                'Check the nozzle of Head %d for a clog (heat + manual push / cold pull)'
+                    % self._disp(head),
+                'ACE_UNLOAD_HEAD HEAD=%d           (only if the filament must come out)'
+                    % head,
+                'ACE_LOAD_HEAD HEAD=%d ACE=%d SLOT=%d   (reload after clearing)'
+                    % (head, ace_index, slot),
+                'RESUME                           (continue the print)',
+            ]
+        else:
+            detail = self._t('msg.pause_swap_load_no_transport',
+                head=self._disp(head), ace=self._disp(ace_index),
+                slot=self._disp(slot))
+            steps = [
+                'Check spool / bowden / ACE path of ACE %d Slot %d (knot, tip, gate)'
+                    % (self._disp(ace_index), self._disp(slot)),
+                'ACE_UNLOAD_HEAD HEAD=%d           (clear partial filament)'
+                    % head,
+                'ACE_LOAD_HEAD HEAD=%d ACE=%d SLOT=%d   (reload)'
+                    % (head, ace_index, slot),
+                'RESUME                           (continue the print)',
+            ]
+        return detail, steps
+
+    def _pause_for_recovery(self, gcmd, detail_msg, recovery_steps, code=0):
         for i, step in enumerate(recovery_steps, 1):
             try:
                 self.gcode.run_script_from_command(
@@ -3006,20 +2970,25 @@ class MultiAce:
 
         active = self.toolhead.get_extruder().get_name() if self.toolhead else 'extruder'
         idx = 0 if active == 'extruder' else int(active.replace('extruder', '') or 0)
-
         if not self._head_is_loaded(idx):
             self._runout_suppress_heads.add(idx)
             logging.info(
                 '[multiACE] recovery: runout suppressed on empty active head %d '
                 'until it is (re)loaded' % idx)
-
+        if getattr(self, '_ace_mode', 'multi') == 'head':
+            for h in range(4):
+                if self.head_uses_ace(h) and not self._head_is_loaded(h):
+                    if h not in self._runout_suppress_heads:
+                        self._runout_suppress_heads.add(h)
+                        logging.info(
+                            '[multiACE] recovery (head mode): runout suppressed '
+                            'on unloaded ACE head %d until it is loaded' % h)
         self._restore_machine_state_for_resume()
         raise gcmd.error(
             message=detail_msg.replace('"', "'")[:200], action='pause',
             id=525, index=idx, code=code, oneshot=1, level=2)
 
     def _machine_state_after_feed_op(self):
-
         try:
             ps = self.printer.lookup_object('print_stats', None)
             if ps is not None and ps.get_status(
@@ -3038,14 +3007,21 @@ class MultiAce:
         form: multiace_event <name> key=val ... seq=<n>. Best-effort: a
         failure here never disturbs the swap. See docs/ENGINE_API.md
         section 5.
+
+        Also mirrored to klippy.log: the RESPOND reaches the response pipe
+        only, and Moonraker keeps the console live-only (~1000 lines, nothing
+        on disk), so without the mirror an event cannot be read after the
+        fact from a submitted log. Logged BEFORE the RESPOND so the line
+        survives a failing response pipe.
         """
         self._event_seq += 1
         fields['seq'] = self._event_seq
         parts = ' '.join('%s=%s' % (k, v) for k, v in fields.items())
+        line = 'multiace_event %s %s' % (name, parts)
+        logging.info('[multiACE] %s' % line)
         try:
             self.gcode.run_script_from_command(
-                'RESPOND TYPE=command MSG="multiace_event %s %s"'
-                % (name, parts))
+                'RESPOND TYPE=command MSG="%s"' % line)
         except Exception:
             pass
 
@@ -3068,9 +3044,8 @@ class MultiAce:
             f"SAVE_VARIABLE VARIABLE={self.VARS_ACE_REVISION} VALUE={mmu_vars_revision}")
 
     def _persist_v2_auto_dry_armed(self):
-        armed_mask = sum(
-            (1 << i) for i in range(8)
-            if self._v2_auto_dry_enabled.get(i, False))
+        armed_mask = sum(1 << i for i in range(8)
+                         if self._v2_auto_dry_enabled.get(i, False))
         self.gcode.run_script_from_command(
             'SAVE_VARIABLE VARIABLE=%s VALUE=%d'
             % (self.VARS_V2_AUTO_DRY_ARMED, armed_mask))
@@ -3135,12 +3110,99 @@ class MultiAce:
             pass
         return True
 
+    def _cancel_v2_timer(self, timer_map, idx):
+        timer = timer_map.pop(idx, None)
+        if timer is None:
+            return
+        try:
+            self.reactor.unregister_timer(timer)
+        except Exception:
+            pass
+
+    def _mark_v2_frame(self, idx, ser, callback, response, eventtime):
+        """Promote a V2 USB port to connected only after a valid ACE frame."""
+        if self._serials.get(idx) is not ser:
+            return
+        self._v2_last_rx_per_ace[idx] = eventtime
+        self._connected_per_ace[idx] = True
+        self._serial_failed_per_ace[idx] = False
+        self._v2_fault_per_ace.pop(idx, None)
+        self._v2_handshake_attempts[idx] = 0
+        self._cancel_v2_timer(self._v2_handshake_timers, idx)
+        if callback is not None:
+            callback(self=self, response=response)
+
+    def _schedule_v2_handshake_retry(self, idx):
+        attempt = self._v2_handshake_attempts.get(idx, 1)
+        if attempt > len(V2_HANDSHAKE_RETRY_DELAYS):
+            logging.warning(
+                '[multiACE] ACE %d V2 controller did not answer after %d '
+                'attempts; leaving it offline until reconnect/restart' % (
+                    idx, attempt))
+            return
+        delay = V2_HANDSHAKE_RETRY_DELAYS[attempt - 1]
+
+        def _retry(eventtime):
+            self._v2_retry_timers.pop(idx, None)
+            if self._connected_per_ace.get(idx, False):
+                return self.reactor.NEVER
+            if not self._is_ace_present(idx):
+                self._v2_handshake_attempts[idx] = attempt + 1
+                self._schedule_v2_handshake_retry(idx)
+                return self.reactor.NEVER
+            logging.info(
+                '[multiACE] retrying unresponsive ACE %d V2 handshake '
+                '(attempt %d)' % (idx, attempt + 1))
+            if not self._open_ace(idx):
+                self._v2_handshake_attempts[idx] = attempt + 1
+                self._schedule_v2_handshake_retry(idx)
+            return self.reactor.NEVER
+
+        self._cancel_v2_timer(self._v2_retry_timers, idx)
+        self._v2_retry_timers[idx] = self.reactor.register_timer(
+            _retry, self.reactor.monotonic() + delay)
+
+    def _start_v2_handshake_watchdog(self, idx, ser):
+        self._cancel_v2_timer(self._v2_handshake_timers, idx)
+
+        def _timeout(eventtime):
+            self._v2_handshake_timers.pop(idx, None)
+            if self._serials.get(idx) is not ser:
+                return self.reactor.NEVER
+            if self._v2_last_rx_per_ace.get(idx, 0) > 0:
+                return self.reactor.NEVER
+            attempt = self._v2_handshake_attempts.get(idx, 0) + 1
+            self._v2_handshake_attempts[idx] = attempt
+            fault = 'V2 controller did not answer the serial handshake'
+            self._v2_fault_per_ace[idx] = fault
+            self._connected_per_ace[idx] = False
+            info = self._info_per_ace.get(idx) or {}
+            info['status'] = 'offline'
+            info['temp'] = None
+            info['humidity'] = None
+            self._info_per_ace[idx] = info
+            gates = self._gate_status_per_ace.setdefault(
+                idx, [GATE_UNKNOWN] * 4)
+            gates[:] = [GATE_UNKNOWN] * 4
+            if idx == self._active_device_index:
+                self._info = info
+                self.gate_status = gates
+            logging.warning(
+                '[multiACE] ACE %d USB serial opened but the V2 controller '
+                'returned no valid frame within %.1fs (attempt %d)' % (
+                    idx, V2_HANDSHAKE_TIMEOUT, attempt))
+            self._disconnect_from(idx)
+            self._schedule_v2_handshake_retry(idx)
+            return self.reactor.NEVER
+
+        self._v2_handshake_timers[idx] = self.reactor.register_timer(
+            _timeout, self.reactor.monotonic() + V2_HANDSHAKE_TIMEOUT)
+
     def _open_ace(self, idx, on_ready=None):
         if idx >= len(self._ace_devices):
             return False
         serial_path = self._ace_devices[idx]
         logging.info('[multiACE] Try connecting ACE %d (%s)' % (idx, serial_path))
-
         try:
             logging.info('[multiACE][DBG] _open_ace ACE %d caller chain:\n%s' % (
                 idx, ''.join(traceback.format_stack(limit=8)[:-1])))
@@ -3148,6 +3210,10 @@ class MultiAce:
             pass
         self._usb_log.info('CONNECT attempt idx=%d serial=%s', idx, serial_path)
         connect_start = time.monotonic()
+
+        self._cancel_v2_timer(self._v2_handshake_timers, idx)
+        self._cancel_v2_timer(self._v2_retry_timers, idx)
+        self._v2_last_rx_per_ace[idx] = 0
 
         old_ht = self._heartbeat_timers.pop(idx, None)
         if old_ht is not None:
@@ -3168,7 +3234,7 @@ class MultiAce:
         old_fd = self._ace_dev_fds.pop(idx, None)
         if old_fd is not None:
             try:
-                self.reactor.set_fd_wake(old_fd, False, False)
+                self.reactor.unregister_fd(old_fd)
             except Exception:
                 pass
         old_ser = self._serials.pop(idx, None)
@@ -3206,7 +3272,6 @@ class MultiAce:
             protocol_cls = self._ace_path_protocol.get(serial_path, AceProtocolV1)
             protocol = protocol_cls()
             self._protocols[idx] = protocol
-
             _open_res = {'ser': None, 'err': None}
             _open_done = threading.Event()
             _open_gaveup = threading.Event()
@@ -3219,7 +3284,6 @@ class MultiAce:
                     _open_done.set()
                     return
                 if _open_gaveup.is_set():
-
                     try:
                         s.close()
                     except Exception:
@@ -3247,14 +3311,19 @@ class MultiAce:
             if ser is None or not ser.is_open:
                 return False
             self._serials[idx] = ser
-            self._connected_per_ace[idx] = True
+            # A USB-UART opening successfully only proves that the CH343 is
+            # present.  V2 is connected after its controller returns a valid
+            # protocol frame; otherwise the UI used to show busy / 0 C forever.
+            self._connected_per_ace[idx] = protocol.NAME != 'v2'
             self._serial_failed_per_ace[idx] = False
             self._request_ids[idx] = 0
             self._callback_maps[idx] = {}
             self._read_buffers[idx] = bytearray()
             self._info_per_ace[idx] = protocol.make_default_info()
             self._feed_assist_per_ace.setdefault(idx, -1)
-            self._gate_status_per_ace[idx] = [GATE_UNKNOWN, GATE_UNKNOWN, GATE_UNKNOWN, GATE_UNKNOWN]
+            _gl = self._gate_status_per_ace.setdefault(
+                idx, [GATE_UNKNOWN, GATE_UNKNOWN, GATE_UNKNOWN, GATE_UNKNOWN])
+            _gl[:] = [GATE_UNKNOWN, GATE_UNKNOWN, GATE_UNKNOWN, GATE_UNKNOWN]
             connect_ms = (time.monotonic() - connect_start) * 1000
             self._usb_stats['connects'] += 1
             self._usb_log.info('CONNECT success idx=%d serial=%s time=%.1fms', idx, serial_path, connect_ms)
@@ -3307,6 +3376,10 @@ class MultiAce:
                     self._fa_log.info(
                         '[v2-init] ace=%d SET_FEED_CHECK enqueue failed: %s'
                         % (idx, e))
+                self._info_per_ace[idx]['status'] = 'connecting'
+                self._info_per_ace[idx]['temp'] = None
+                self._info_per_ace[idx]['humidity'] = None
+                self._start_v2_handshake_watchdog(idx, ser)
             handshake_requests = protocol.initial_handshake_requests() or []
 
             ready_state = {'fired': False}
@@ -3328,7 +3401,6 @@ class MultiAce:
                         _fire_ready()
                 self.send_request_to(idx, request=dict(req), callback=cb)
             if on_ready is not None:
-
                 def _ready_timeout(eventtime):
                     _fire_ready()
                     return self.reactor.NEVER
@@ -3390,16 +3462,19 @@ class MultiAce:
             except Exception:
                 pass
         self._v2_velocity_state.pop(idx, None)
+        self._cancel_v2_timer(self._v2_handshake_timers, idx)
         fd = self._ace_dev_fds.pop(idx, None)
         if fd is not None:
             try:
-                self.reactor.set_fd_wake(fd, False, False)
+                self.reactor.unregister_fd(fd)
             except Exception:
                 pass
         self._serials.pop(idx, None)
 
     def _make_reader_cb_for(self, idx):
         def _reader(eventtime):
+            if self._serial_failed_per_ace.get(idx, False):
+                return
             ser = self._serials.get(idx)
             if ser is None or not ser.is_open:
                 return
@@ -3411,6 +3486,23 @@ class MultiAce:
                 logging.info('ACE[%d] error reading/processing: %s' % (
                     idx, traceback.format_exc()))
                 logging.info("Unable to communicate with ACE %d" % idx)
+                fd = self._ace_dev_fds.pop(idx, None)
+                if fd is not None:
+                    try:
+                        self.reactor.unregister_fd(fd)
+                    except Exception:
+                        pass
+                if not self._serial_failed_per_ace.get(idx, False):
+                    self._serial_failed_per_ace[idx] = True
+                    try:
+                        self.reactor.register_async_callback(
+                            lambda et, i=idx: self._reconnect_or_pause(
+                                i, 'v1 reader comms lost'))
+                    except Exception as re:
+                        logging.info(
+                            '[multiACE] V1 reader reconnect schedule failed '
+                            'ACE %d: %s' % (idx, str(re)))
+                        self._handle_per_ace_failure(idx, 'v1 reader comms lost')
         return _reader
 
     def _make_v2_writer_thread_for(self, idx, ser, protocol):
@@ -3437,13 +3529,12 @@ class MultiAce:
                         break
                     logging.info('[multiACE] V2 writer ACE %d error: %s' % (
                         idx, e))
-
                     if not self._serial_failed_per_ace.get(idx, False):
                         self._serial_failed_per_ace[idx] = True
                         try:
                             self.reactor.register_async_callback(
                                 lambda et, i=idx, er=str(e):
-                                    self._v2_reconnect_or_pause(i, er))
+                                    self._reconnect_or_pause(i, er))
                         except Exception as re:
                             logging.info(
                                 '[multiACE] V2 writer reconnect schedule failed '
@@ -3462,14 +3553,13 @@ class MultiAce:
                 except Exception as e:
                     if stop.is_set():
                         break
-
                     logging.info('[multiACE] V2 reader ACE %d error: %s' % (idx, e))
                     if not self._serial_failed_per_ace.get(idx, False):
                         self._serial_failed_per_ace[idx] = True
                         try:
                             self.reactor.register_async_callback(
                                 lambda et, i=idx, er=str(e):
-                                    self._v2_reconnect_or_pause(i, er))
+                                    self._reconnect_or_pause(i, er))
                         except Exception as re:
                             logging.info(
                                 '[multiACE] V2 reader reconnect schedule failed '
@@ -3494,14 +3584,14 @@ class MultiAce:
                         with lock:
                             cb_map = self._callback_maps.get(idx, {})
                             cb = cb_map.pop(msg_id, None)
-                    if cb is not None:
-                        try:
-                            self.reactor.register_async_callback(
-                                lambda et, c=cb, r=ret: c(self=self, response=r))
-                        except Exception as e:
-                            logging.info(
-                                '[multiACE] V2 async dispatch failed ACE %d: %s'
-                                % (idx, e))
+                    try:
+                        self.reactor.register_async_callback(
+                            lambda et, c=cb, r=ret, s=ser: self._mark_v2_frame(
+                                idx, s, c, r, et))
+                    except Exception as e:
+                        logging.info(
+                            '[multiACE] V2 async dispatch failed ACE %d: %s'
+                            % (idx, e))
         return _loop
 
     def _process_data_for(self, idx, raw_bytes):
@@ -3521,12 +3611,13 @@ class MultiAce:
                 callback(self=self, response=ret)
 
     def send_request_to(self, idx, request, callback):
-
         info = self._info_per_ace.get(idx)
         if info is None:
             info = self._make_default_info(idx)
             self._info_per_ace[idx] = info
-        info['status'] = 'busy'
+        if request.get('method') not in (
+                'get_status', 'get_feed_info', 'get_filament_info'):
+            info['status'] = 'busy'
         msg_id = self._next_request_id_for(idx)
         cb_map = self._callback_maps.setdefault(idx, {})
 
@@ -3597,7 +3688,15 @@ class MultiAce:
         if ser is None or self._serial_failed_per_ace.get(idx, False):
             raise Exception('[multiACE] serial[%d] unavailable' % idx)
         try:
+            _sw_t0 = time.monotonic() if self.stall_watchdog else None
             ser.write(data)
+            if _sw_t0 is not None:
+                _sw_dt = time.monotonic() - _sw_t0
+                if _sw_dt > STALL_SRC_THRESHOLD:
+                    logging.warning(
+                        '[multiACE][stall-src] sync ser.write ACE %d method=%s '
+                        'blocked %.0fms (reactor-thread write backpressure)'
+                        % (idx, request.get('method', '?'), _sw_dt * 1000.))
             return
         except Exception as e:
             err_first = str(e)
@@ -3635,32 +3734,14 @@ class MultiAce:
                 pass
             self._connected_per_ace[idx] = False
 
-            reconnected = False
-            for attempt, delay in enumerate((0.35, 1.0, 2.0), start=1):
-                try:
-                    self.reactor.pause(self.reactor.monotonic() + delay)
-                except Exception:
-                    pass
-                try:
-                    reconnected = self._open_ace(idx)
-                except Exception as ce:
-                    logging.info(
-                        '[multiACE] Sync reconnect[%d] attempt %d raised: %s'
-                        % (idx, attempt, str(ce)))
-                    reconnected = False
-                if reconnected:
-                    break
-                logging.info(
-                    '[multiACE] Sync reconnect[%d] attempt %d/3 failed'
-                    % (idx, attempt))
+            self._serial_failed_per_ace[idx] = True
+            self._reconnect_or_pause(idx, err_first)
 
-            if reconnected:
-
+            if not self._serial_failed_per_ace.get(idx, False):
                 new_cb_map = self._callback_maps.setdefault(idx, {})
                 for mid, cb in saved_cb_map.items():
                     if mid not in new_cb_map:
                         new_cb_map[mid] = cb
-
                 new_ser = self._serials.get(idx)
                 if new_ser is not None:
                     try:
@@ -3675,7 +3756,6 @@ class MultiAce:
                                 'SERIAL_WRITE_RECOVERED', {'idx': idx})
                         except Exception:
                             pass
-                        self._serial_failed_per_ace[idx] = False
                         return
                     except Exception as e2:
                         err_second = str(e2)
@@ -3691,10 +3771,73 @@ class MultiAce:
                     idx, err_second, err_first)
             except Exception:
                 pass
-            self._handle_per_ace_failure(idx, err_second)
             raise Exception(
                 '[multiACE] serial[%d] write failed (reconnect+retry both failed)'
                 % idx)
+
+    def _maybe_pause_fa_exhausted(self, idx, slot, attempts):
+        """Last-resort resumable PAUSE when the FA arm retry budget is
+        exhausted (fa_failed_final) for the slot feeding the ACTIVE printing
+        head on a V2. Same policy as the comms-loss give-up pause (§10): the
+        ACE 2 cannot freewheel, so a lane whose arm terminally failed prints
+        air until the next arm trigger (tester field case 2026-07-19: 6/6
+        FORBIDDEN on two slots, lanes declared dead mid-print). V1 lanes stay
+        alert-only (the extruder pulls through a freewheeling V1). Mid-swap
+        the inline feed machinery owns failures (phase3 flow check + the §12
+        pause with pos-restore) - do not pause from here without that
+        restore. RESUME lands in _on_print_start, which re-arms the active
+        lane (§8) - the pause IS the long-horizon retry."""
+        if not self._is_v2_idx(idx):
+            return
+        if self._fa_failed_pause_sent:
+            return
+        if self._fa_context != 'print':
+            return
+        if self._swap_in_progress:
+            return
+        try:
+            extruder = self.toolhead.get_extruder()
+            head = getattr(extruder, 'extruder_index',
+                           getattr(extruder, 'extruder_num', None))
+        except Exception:
+            head = None
+        if head is None:
+            return
+        source = self._head_source.get(head)
+        if source is None:
+            return
+        if int(source.get('ace_index', -1)) != idx:
+            return
+        if int(source.get('slot', -1)) != slot:
+            return
+        self._fa_failed_pause_sent = True
+        detail = self._t('msg.fa_failed_pause',
+                         ace=self._disp(idx), slot=self._disp(slot),
+                         attempts=attempts, head=self._disp(head))
+        def _do_pause(eventtime):
+            try:
+                self.gcode.run_script(
+                    'RESPOND TYPE=error MSG="%s"' % detail.replace('"', "'"))
+            except Exception:
+                pass
+            try:
+                em = self.printer.lookup_object('exception_manager', None)
+                if em is not None:
+                    em.raise_exception_async(
+                        id=em.list.MODULE_ID_FEEDING, index=head, code=0,
+                        message=detail, oneshot=1, level=2)
+            except Exception:
+                pass
+            try:
+                self.gcode.run_script('PAUSE')
+            except Exception as pe:
+                logging.info('[multiACE] FA-exhausted PAUSE failed: %s'
+                             % str(pe))
+            return self.reactor.NEVER
+        try:
+            self.reactor.register_timer(_do_pause, self.reactor.NOW)
+        except Exception:
+            pass
 
     def _handle_per_ace_failure(self, idx, err):
         was_failed = self._serial_failed_per_ace.get(idx, False)
@@ -3711,11 +3854,9 @@ class MultiAce:
                 self._disconnect_from(idx)
             except Exception:
                 pass
-
         if not self._serial_failed_pause_sent:
             self._serial_failed_pause_sent = True
             def _do_pause(eventtime):
-
                 try:
                     active = self.toolhead.get_extruder().get_name() \
                         if self.toolhead else 'extruder'
@@ -3738,7 +3879,6 @@ class MultiAce:
                             message=detail, oneshot=1, level=2)
                 except Exception:
                     pass
-
                 try:
                     sp = getattr(self, '_swap_saved_pos', None)
                     if self._swap_in_progress and sp:
@@ -3775,28 +3915,28 @@ class MultiAce:
             except Exception:
                 pass
 
-    def _v2_reconnect_or_pause(self, idx, err):
-        """Recovery-first handler for a V2 comms loss ([Errno 5] on the
-        background reader/writer thread). MUST run on the reactor thread
-        (marshalled via register_async_callback) - _open_ace registers
-        timers/threads/fds and is not thread-safe.
+    def _reconnect_or_pause(self, idx, err):
+        """Protocol-agnostic recovery-first handler for a comms loss ([Errno 5]).
+        The ONE recovery path for BOTH V1 and V2 (parity - Dirk: "V1 freewheel is
+        not an excuse to keep printing", it caused airprint). MUST run on the
+        reactor thread: the V2 threads marshal it via register_async_callback,
+        the V1 reader (on the reactor thread) schedules it the same way, and the
+        V1 sync-write path calls it inline. _open_ace registers timers/threads/
+        fds and is not thread-safe, so it must only run on the reactor.
 
-        The V2 path previously had NO safety net: the writer thread only
-        logged [Errno 5] and spun forever on the dead handle, so a USB drop
-        meant silent dry printing (FA host-intent kept logging 'assisting'
-        while nothing reached the device). Here we mirror the V1 sync-write
-        recovery: close + _open_ace with backoff; on success the print
-        CONTINUES (FA re-armed for the active head), only the brief reconnect
-        gap is lost. PAUSE (resumable) is the last resort when the device
-        truly can't be reopened (e.g. gone until a power-cycle)."""
+        Guarded by _reconnecting_per_ace so read/write failures on the same ACE
+        never run _open_ace concurrently. Backoff 0.3/0.8/1.6 s; on success the
+        print CONTINUES (FA re-armed for the active head via on_ready), only the
+        brief gap is lost. PAUSE (resumable) is the last resort when the device
+        can't be reopened (e.g. gone until a power-cycle)."""
         if self._reconnecting_per_ace.get(idx, False):
             return
         self._reconnecting_per_ace[idx] = True
         try:
-            logging.info('[multiACE] V2 ACE %d comms lost (%s) - reconnecting'
+            logging.info('[multiACE] ACE %d comms lost (%s) - reconnecting'
                          % (idx, err))
             try:
-                self._state_log.warning('V2_COMMS_LOST idx=%d error=%s', idx, err)
+                self._state_log.warning('COMMS_LOST idx=%d error=%s', idx, err)
             except Exception:
                 pass
             reconnected = False
@@ -3809,12 +3949,12 @@ class MultiAce:
                     reconnected = self._open_ace(
                         idx, on_ready=lambda i=idx: self._rearm_fa_after_reconnect(i))
                 except Exception as ce:
-                    logging.info('[multiACE] V2 reconnect[%d] attempt %d raised: %s'
+                    logging.info('[multiACE] reconnect[%d] attempt %d raised: %s'
                                  % (idx, attempt, str(ce)))
                     reconnected = False
                 if reconnected:
                     break
-                logging.info('[multiACE] V2 reconnect[%d] attempt %d/3 failed'
+                logging.info('[multiACE] reconnect[%d] attempt %d/3 failed'
                              % (idx, attempt))
             if reconnected:
                 self._serial_failed_per_ace[idx] = False
@@ -3822,10 +3962,9 @@ class MultiAce:
                 self.log_always(self._t('msg.serial_write_recovered',
                                         ace=self._disp(idx)))
                 try:
-                    self._audit_state('V2_RECONNECTED', {'idx': idx})
+                    self._audit_state('RECONNECTED', {'idx': idx})
                 except Exception:
                     pass
-
             else:
                 self._usb_stats['errno5_unrecovered'] += 1
                 self._handle_per_ace_failure(idx, err)
@@ -3852,8 +3991,8 @@ class MultiAce:
             return
         if int(source.get('ace_index', -1)) != idx:
             return
-
         self._feed_assist_per_ace[idx] = -1
+        self._fa_rearm_reset(idx)
         try:
             self._arm_fa_for(idx, source['slot'])
             self.log_always(
@@ -3861,113 +4000,6 @@ class MultiAce:
                 % (self._disp(idx), head_index, self._disp(source['slot'])))
         except Exception as e:
             logging.info('[multiACE] FA re-arm after reconnect failed: %s' % e)
-
-    def _active_head_index(self):
-        try:
-            extruder = self.toolhead.get_extruder()
-            return getattr(extruder, 'extruder_index',
-                           getattr(extruder, 'extruder_num', None))
-        except Exception:
-            return None
-
-    def _force_rearm_print_assist(self, head=None, reason='resume',
-                                  wait=0.25, clear_all=True):
-        """Force print-time FA intent back onto the ACE after a pause/resume.
-
-        Error pauses do not emit print_stats:start again, and ACE2 Pro may
-        silently drop assist while the host cache still says the slot is armed.
-        Clear cached FA intent for loaded ACE heads, then re-send
-        start_feed_assist for the active/selected head before the resume macro
-        primes or returns to the path.
-        """
-        if getattr(self, '_ace_mode', 'normal') not in ('multi', 'head'):
-            return False
-        if head is None:
-            head = self._active_head_index()
-        if head is None:
-            self._audit_state('FA_REARM_RESUME', {
-                'reason': reason, 'action': 'no_active_head'})
-            return False
-        try:
-            head = int(head)
-        except (TypeError, ValueError):
-            return False
-        if head < 0 or head > 3 or not self.head_uses_ace(head):
-            self._audit_state('FA_REARM_RESUME', {
-                'reason': reason, 'head': head, 'action': 'head_not_ace'})
-            return False
-        source = self._head_source.get(head)
-        if source is None:
-            self._audit_state('FA_REARM_RESUME', {
-                'reason': reason, 'head': head, 'action': 'no_head_source'})
-            return False
-
-        idx = int(source.get('ace_index', -1))
-        slot = int(source.get('slot', -1))
-        if idx < 0 or idx >= len(self._ace_devices) or slot < 0 or slot > 3:
-            self._audit_state('FA_REARM_RESUME', {
-                'reason': reason, 'head': head, 'ace': idx, 'slot': slot,
-                'action': 'invalid_source'})
-            return False
-
-        self._auto_feed_enabled = True
-        self._fa_context = 'print'
-        self._serial_failed_pause_sent = False
-        if getattr(self, '_v2_active_rev_assist', False):
-            self._v2_active_rev_assist = False
-            self._fa_trace('resume rearm cleared _v2_active_rev_assist')
-
-        try:
-            self._reopen_failed_aces_on_resume()
-        except Exception as e:
-            logging.info('[multiACE] resume rearm reopen failed: %s' % e)
-
-        if clear_all:
-            cleared = []
-            for _h, _src in self._head_source.items():
-                if _src is None or not self.head_uses_ace(_h):
-                    continue
-                _idx = int(_src.get('ace_index', -1))
-                if _idx < 0:
-                    continue
-                if self._feed_assist_per_ace.get(_idx, -1) != -1:
-                    cleared.append((_idx, self._feed_assist_per_ace.get(_idx)))
-                self._feed_assist_per_ace[_idx] = -1
-            self._feed_assist_index = self._feed_assist_per_ace.get(
-                self._active_device_index, -1)
-            if cleared:
-                self._fa_log.info(
-                    '[resume-rearm] cleared cached FA slots: %s'
-                    % ', '.join('ACE%d:%s' % (a, s) for a, s in cleared))
-
-        if not self._connected_per_ace.get(idx, False):
-            self._audit_state('FA_REARM_RESUME', {
-                'reason': reason, 'head': head, 'ace': idx, 'slot': slot,
-                'action': 'ace_not_connected'})
-            self.log_error('[multiACE] resume: ACE %s not connected - '
-                           'feed assist was not re-armed' % self._disp(idx))
-            return False
-
-        if self._active_device_index != idx:
-            self._set_active_idx(idx)
-        try:
-            self.wait_ace_ready_on(idx, timeout=8.0, max_reconnects=1)
-        except Exception as e:
-            logging.info('[multiACE] resume rearm wait ACE %d failed: %s'
-                         % (idx, e))
-        self._arm_fa_for(idx, slot)
-        if self._is_v2_idx(idx):
-            self._v2_schedule_fa_rearm(
-                idx, slot, 'resume-verify:%s' % reason, delay=0.75)
-        if wait and wait > 0:
-            self.dwell(wait)
-        self.log_always('[multiACE] resume: feed assist re-armed for '
-                        'T%d / ACE %s Slot %s'
-                        % (head, self._disp(idx), self._disp(slot)))
-        self._audit_state('FA_REARM_RESUME', {
-            'reason': reason, 'head': head, 'ace': idx, 'slot': slot,
-            'action': 'rearmed'})
-        return True
 
     def _reopen_failed_aces_on_resume(self):
         """A comms-loss give-up PAUSE leaves the failed ACE dead: the recovery
@@ -3982,7 +4014,6 @@ class MultiAce:
             if not self._serial_failed_per_ace.get(idx, False):
                 continue
             try:
-
                 ok = self._open_ace(
                     idx, on_ready=lambda i=idx: self._rearm_fa_after_reconnect(i))
             except Exception as e:
@@ -3998,6 +4029,43 @@ class MultiAce:
                     '[multiACE] resume: ACE %s still unreachable - feed will '
                     'not resume for its heads' % self._disp(idx))
 
+    def _schedule_reopen_failed_aces_on_resume(self):
+        failed = [idx for idx, failed in self._serial_failed_per_ace.items()
+                  if failed]
+        if not failed:
+            return
+        for idx in failed:
+            if idx in self._resume_reopen_pending:
+                continue
+            self._resume_reopen_pending.add(idx)
+
+            def _reopen(eventtime, _idx=idx):
+                self._resume_reopen_pending.discard(_idx)
+                if not self._auto_feed_enabled or self._fa_context != 'print':
+                    return self.reactor.NEVER
+                if not self._serial_failed_per_ace.get(_idx, False):
+                    return self.reactor.NEVER
+                try:
+                    ok = self._open_ace(
+                        _idx, on_ready=lambda i=_idx:
+                        self._rearm_fa_after_reconnect(i))
+                except Exception as e:
+                    ok = False
+                    logging.info('[multiACE] deferred resume reopen ACE %d raised: %s'
+                                 % (_idx, str(e)))
+                if ok:
+                    self.log_always(
+                        '[multiACE] resume: reopened ACE %s after MCU timing '
+                        'settled - FA will re-arm' % self._disp(_idx))
+                else:
+                    self.log_error(
+                        '[multiACE] resume: ACE %s still unreachable - feed will '
+                        'not resume for its heads' % self._disp(_idx))
+                return self.reactor.NEVER
+
+            self.reactor.register_timer(
+                _reopen, self.reactor.monotonic() + 2.0)
+
     def _on_homing_move_begin(self, hmove):
         self._homing_active = True
         self._touch_homing_flag()
@@ -4005,7 +4073,6 @@ class MultiAce:
     def _on_homing_move_end(self, hmove):
         self._homing_active = False
         self._last_homing_end = self.reactor.monotonic()
-
         self._touch_homing_flag()
 
     def _v1_fa_blocked_by_homing(self, idx):
@@ -4043,9 +4110,11 @@ class MultiAce:
         if waited:
             self._fa_trace('command deferred until homing/probe finished')
 
-    def _arm_fa_for(self, idx, slot):
+    def _arm_fa_for(self, idx, slot, from_recovery=False):
         self._fa_trace('_arm_fa_for(idx=%d, slot=%d) called; gate=%s context=%s'
                        % (idx, slot, self._auto_feed_enabled, self._fa_context))
+        if not from_recovery:
+            self._fa_rearm_reset(idx, slot)
 
         if getattr(self, '_v2_active_rev_assist', False):
             self._v2_active_rev_assist = False
@@ -4064,29 +4133,15 @@ class MultiAce:
             logging.info(
                 '[multiACE] FA suppressed for ACE %d during load (fa_load_disable)' % idx)
             return
-        if self.head_is_manual(slot):
+        _fa_head = (self._head_for_ace(idx)
+                    if getattr(self, '_ace_mode', 'multi') == 'head' else slot)
+        if _fa_head is not None and self.head_is_manual(_fa_head):
             self._fa_trace(
-                'FA suppressed: head %d is manual (TPU bypass)' % slot)
+                'FA suppressed: head %d is manual (TPU bypass)' % _fa_head)
             return
-
-        # ACE2 Pro treats start_feed_assist as non-idempotent: it returns
-        # error_2 when the same lane is already assisting.  A cache clear can
-        # happen during a tool transition while the physical ACE keeps feeding,
-        # so consult the device state before sending a duplicate command.
-        if self._is_v2_idx(idx):
-            current_status = self._v2_get_slot_status(idx, slot)
-            if current_status == 'assisting':
-                self._feed_assist_per_ace[idx] = slot
-                if idx == self._active_device_index:
-                    self._feed_assist_index = slot
-                self._fa_log.info(
-                    'FA start skipped: ACE %d slot %d already assisting; '
-                    'host cache repaired' % (idx, slot))
-                return
 
         prev_slot = self._feed_assist_per_ace.get(idx, -1)
         if prev_slot == slot:
-
             if self._is_v2_idx(idx):
                 slot_status = self._v2_get_slot_status(idx, slot)
                 if slot_status in V2_FA_RUNNING_STATES:
@@ -4126,7 +4181,6 @@ class MultiAce:
         self._feed_assist_per_ace[idx] = slot
         if idx == self._active_device_index:
             self._feed_assist_index = slot
-
         _vst = self._v2_velocity_state.get(idx)
         if _vst is not None:
             _vst['last_arm_time'] = self.reactor.monotonic()
@@ -4151,21 +4205,13 @@ class MultiAce:
                             'start_feed_assist OK after %d retry(s): ACE %d slot %d'
                             % (attempt, idx, slot))
                     return
-                if msg == 'error_2' and self._is_v2_idx(idx):
-                    # The status snapshot may have been refreshed between
-                    # send and reply.  Prefer the current device status, then
-                    # fall back to the velocity sampler's last snapshot.
-                    current_status = self._v2_get_slot_status(idx, slot)
+                if msg == 'error_2':
                     vstate = self._v2_velocity_state.get(idx)
                     snap = (vstate or {}).get('last_slot_statuses', {})
-                    if current_status == 'assisting' or \
-                            snap.get(slot) == 'assisting':
-                        self._feed_assist_per_ace[idx] = slot
-                        if idx == self._active_device_index:
-                            self._feed_assist_index = slot
+                    if snap.get(slot) == 'assisting':
                         self._fa_log.info(
-                            'start_feed_assist error_2 accepted: ACE %d slot %d '
-                            'already assisting; host cache repaired' % (idx, slot))
+                            'start_feed_assist error_2 ignored - ACE %d slot %d already assisting'
+                            % (idx, slot))
                         return
                 if msg in ('forbidden', 'error_2') and attempt < max_retries:
                     next_attempt = attempt + 1
@@ -4211,10 +4257,10 @@ class MultiAce:
                     msg=response.get('msg', ''))
                 self.log_error(final_msg)
                 self._fa_log.error(final_msg)
+                self._maybe_pause_fa_exhausted(idx, slot, attempt + 1)
             return start_callback
 
         def _send_start():
-
             if self._v1_fa_blocked_by_homing(idx):
                 self._fa_trace(
                     'FA start deferred (homing active/recent): ACE %d slot %d'
@@ -4437,7 +4483,6 @@ class MultiAce:
         self.dwell(delay=0.7)
 
     _V2_FILAMENT_INFO_PENDING_TTL = 5.0
-
     _V2_FILAMENT_INFO_EMPTY_TTL = 60.0
 
     def _merge_v2_filament_info(self, idx, result):
@@ -4460,7 +4505,6 @@ class MultiAce:
                     slot['sku'] = cached.get('sku', '')
                 else:
                     slot['rfid'] = 1
-
                     empty_ts = empty.get(i)
                     if empty_ts is not None and (now - empty_ts) < self._V2_FILAMENT_INFO_EMPTY_TTL:
                         continue
@@ -4490,7 +4534,6 @@ class MultiAce:
                             res.get('color'), res.get('brand'),
                             res.get('sku'), response)
                         if not ftype:
-
                             self._v2_filament_info_empty.setdefault(
                                 _idx, {})[_slot] = time.monotonic()
                             return
@@ -4555,13 +4598,7 @@ class MultiAce:
         after 50ms reactor dwell.
         """
         if target_mode == 3:
-            # The first 15mm separation move is shorter than the direction
-            # confirmation window, so the tracker may dispatch after motion
-            # has already paused for cooling.  Never arm rollback assist at
-            # the idle-speed floor: later shaping moves reach 25mm/s and a
-            # 5mm/s ACE cap produced assist_error in printer testing.
-            dispatch_speed = max(
-                25, self._v2_quantize_velocity(current_v, 'rev'))
+            dispatch_speed = self._v2_quantize_velocity(current_v, 'rev')
         else:
 
             dispatch_speed = 10
@@ -4676,7 +4713,6 @@ class MultiAce:
             'last_armed_slot': None,
 
             'last_arm_time': 0.0,
-
             'print_disarm_since': None,
         })
 
@@ -4688,6 +4724,12 @@ class MultiAce:
             if info is None:
                 return eventtime + 0.5
             slots = info.get('slots') or []
+            # The official flow calibration is deliberately slow and pulsed.
+            # Keep the V2 re-arm watchdog alive during it, but do not let its
+            # normal assist-error backoff suspend the slot for the real print.
+            if self._is_flow_calibrating():
+                self._fa_rearm_fails.clear()
+                self._fa_rearm_suspended.clear()
 
             status_snapshot = {}
             for s in slots:
@@ -4723,6 +4765,19 @@ class MultiAce:
                                     % (idx, sidx, age))
             state['last_slot_statuses'] = status_snapshot
 
+            try:
+                _mr = self.printer.lookup_object('motion_report', None)
+                if _mr is not None:
+                    _ev = float(_mr.get_status(eventtime).get(
+                        'live_extruder_velocity', 0.0) or 0.0)
+                    if abs(_ev) >= 0.3:
+                        state['last_extrude_active_time'] = eventtime
+            except Exception:
+                pass
+            _extrude_idle = (
+                eventtime - state.get('last_extrude_active_time', 0.0)
+                > FA_EXTRUDE_IDLE_GRACE)
+
             target_slot = None
             active_head = None
             try:
@@ -4750,17 +4805,20 @@ class MultiAce:
                     break
 
             if armed_slot is None:
-
+                state['armed_since'] = None
+                state['armed_since_slot'] = None
                 _verify_to = self._fa_settle_after_stop + FA_ASSIST_VERIFY_MARGIN
                 if (target_slot is not None
                         and self._feed_assist_per_ace.get(idx, -1) == target_slot
                         and self._auto_feed_enabled
                         and self._fa_context == 'print'
                         and not getattr(self, '_v2_active_rev_assist', False)
+                        and not _extrude_idle
                         and self._v2_get_slot_status(idx, target_slot)
                             not in V2_FA_RUNNING_STATES
                         and (eventtime - state.get('last_arm_time', 0.0)
-                             > _verify_to)):
+                             > _verify_to)
+                        and self._fa_rearm_backoff_ok(idx, target_slot)):
                     self._fa_log.warning(
                         '[v2-recover] FA arm not confirmed on ACE %d slot %d '
                         '(%.1fs since arm, never -> assisting) - resending'
@@ -4774,7 +4832,6 @@ class MultiAce:
                         if s.get('index') == last_idx:
                             new_state = s.get('slot_status', 'unknown')
                             break
-
                     if new_state not in V2_FA_RUNNING_STATES:
                         self._fa_log.info(
                             '[v2-vel] ace=%d disarmed (was slot=%s, now=%s)' % (
@@ -4788,7 +4845,9 @@ class MultiAce:
                             self._clear_fa_cache_for(idx, last_idx)
                             if (target_slot == last_idx and self._auto_feed_enabled
                                     and self._fa_context in ('print', 'load')
-                                    and not getattr(self, '_v2_active_rev_assist', False)):
+                                    and not _extrude_idle
+                                    and not getattr(self, '_v2_active_rev_assist', False)
+                                    and self._fa_rearm_backoff_ok(idx, last_idx)):
                                 self._v2_schedule_fa_rearm(
                                     idx, last_idx, 'slot-disarmed:%s' % new_state)
 
@@ -4803,12 +4862,14 @@ class MultiAce:
                         and self._auto_feed_enabled
                         and self._fa_context == 'print'
                         and not self._swap_in_progress
+                        and not _extrude_idle
                         and not getattr(self, '_v2_active_rev_assist', False)
                         and self._v2_get_slot_status(idx, target_slot)
                             not in V2_FA_RUNNING_STATES):
                     if state.get('print_disarm_since') is None:
                         state['print_disarm_since'] = eventtime
-                    elif (eventtime - state['print_disarm_since']) > _verify_to:
+                    elif ((eventtime - state['print_disarm_since']) > _verify_to
+                            and self._fa_rearm_backoff_ok(idx, target_slot)):
                         self._fa_log.warning(
                             '[v2-recover] print-head FA disarmed without re-arm '
                             'on ACE %d slot %d (%.1fs down, host action) - '
@@ -4819,8 +4880,13 @@ class MultiAce:
                 else:
                     state['print_disarm_since'] = None
                 return eventtime + 0.5
-
             state['print_disarm_since'] = None
+            if state.get('armed_since_slot') != armed_slot:
+                state['armed_since'] = eventtime
+                state['armed_since_slot'] = armed_slot
+            elif (eventtime - state.get('armed_since', eventtime)
+                    > FA_STICK_CONFIRM_TIME):
+                self._fa_rearm_reset(idx, armed_slot)
             if state['last_armed_slot'] != armed_slot:
                 self._fa_log.info(
                     '[v2-vel] ace=%d armed slot=%d status=%s' % (
@@ -4838,14 +4904,7 @@ class MultiAce:
                     '[v2-vel] ace=%d motion_report read failed: %s' % (idx, e))
                 return eventtime + 0.5
 
-            if (abs(v) < 0.3
-                    and getattr(self, '_v2_active_rev_assist', False)):
-                # During unload, heater waits and cooling dwells are pauses in
-                # one continuous pull.  Preserve the last real direction so
-                # ACE2 keeps rollback tension instead of briefly feeding the
-                # soft tip back toward the hotend at every pause.
-                direction = state['last_direction'] or 'fwd'
-            elif abs(v) < 0.3:
+            if abs(v) < 0.3:
                 direction = 'fwd'
             else:
                 direction = 'fwd' if v >= 0 else 'rev'
@@ -4861,8 +4920,6 @@ class MultiAce:
                 self._fa_log.info(
                     '[v2-vel] ace=%d slot=%d %s vel=%+.2f q=%d dir=%s' % (
                         idx, armed_slot, armed_status, v, quantum, direction))
-            if direction == 'rev' and quantum > 0:
-                state['last_reverse_time'] = eventtime
 
             if (self._v2_print_assist_mode == 'constant'
                     and armed_status in ('assisting', 'rollback_assisting')):
@@ -4872,7 +4929,6 @@ class MultiAce:
                     'cand_since': eventtime,
                     'speed_pinned': False,
                 })
-
                 if (not cdisp['speed_pinned']
                         and self._v2_constant_assist_speed > 0):
                     cdisp['speed_pinned'] = True
@@ -4888,7 +4944,6 @@ class MultiAce:
                     except Exception as e:
                         self._fa_log.info(
                             '[v2-vel] constant pin enqueue failed: %s' % e)
-
                 if direction != cdisp['cand_dir']:
                     cdisp['cand_dir'] = direction
                     cdisp['cand_since'] = eventtime
@@ -5002,16 +5057,13 @@ class MultiAce:
                 prev_info = self._info_per_ace.get(idx, self._make_default_info(idx))
                 prev_slots = prev_info.get('slots', [])
                 self._merge_v2_filament_info(idx, result)
-
                 for _s in result.get('slots', []) or []:
                     if isinstance(_s, dict):
                         _bt, _st, _vn = self._split_type_subtype(_s.get('type', ''))
                         _s['type'] = _bt
                         _s['subtype'] = _st
-
                         if _vn and not (_s.get('brand') or ''):
                             _s['brand'] = _vn
-
                 display_refresh_needed = False
                 for i in range(4):
                     try:
@@ -5019,10 +5071,6 @@ class MultiAce:
                     except (KeyError, IndexError):
                         continue
                     prev_slot = prev_slots[i] if i < len(prev_slots) else {}
-                    new_ss = new_slot.get('slot_status')
-                    prev_ss = prev_slot.get('slot_status')
-                    if new_ss != prev_ss:
-                        self._v2_slot_status_since[(idx, i)] = self.reactor.monotonic()
                     if is_active:
                         was_empty = self._is_empty_status(prev_slot.get('status'))
                         now_empty = self._is_empty_status(new_slot.get('status'))
@@ -5031,10 +5079,19 @@ class MultiAce:
                     if (is_active
                             and self._gate_status_per_ace.get(idx, [GATE_UNKNOWN] * 4)[i] == GATE_EMPTY
                             and not self._is_empty_status(new_slot.get('status'))
-                            and not self._swap_in_progress):
+                            and not self._swap_in_progress
+                            and not self._is_actively_printing()):
                         self.log_always(self._t('msg.auto_feed'))
                         self.reactor.register_async_callback(
                             (lambda et, c=self._pre_load, gate=i: c(gate)))
+                    elif (is_active
+                            and self._gate_status_per_ace.get(idx, [GATE_UNKNOWN] * 4)[i] == GATE_EMPTY
+                            and not self._is_empty_status(new_slot.get('status'))
+                            and not self._swap_in_progress
+                            and self._is_actively_printing()):
+                        logging.info('[multiACE] slot insert on ACE %d slot %d '
+                                     'during print - pre-load deferred (not '
+                                     'while actively printing)' % (idx, i))
                     if (new_slot.get('rfid') == 2
                             and prev_slot.get('rfid') != 2
                             and not self._swap_in_progress):
@@ -5083,30 +5140,18 @@ class MultiAce:
                                 push_brand  = new_brand
                                 push_subtype = new_subtype
                             for head in target_heads:
-
                                 if not self.head_uses_ace(head):
                                     continue
-                                self._expect_ptc_push(head, push_type, push_color, push_brand, push_subtype)
-                                self.gcode.run_script_from_command(
-                                    'SET_PRINT_FILAMENT_CONFIG '
-                                    'CONFIG_EXTRUDER=%d '
-                                    'FILAMENT_TYPE="%s" '
-                                    'FILAMENT_COLOR_RGBA=%s '
-                                    'VENDOR="%s" '
-                                    'FILAMENT_SUBTYPE="%s"' % (
-                                        head,
-                                        push_type,
-                                        push_color,
-                                        push_brand,
-                                        push_subtype))
-                        elif is_active:
-
-                            source = self._head_source.get(i)
-
-                            if not self.head_uses_ace(i):
+                                self._ptc_push_guarded(
+                                    head, push_type, push_color, push_brand,
+                                    push_subtype, 'rfid-transition')
+                        else:
+                            fb_head = self._display_head_for_slot(idx, i, is_active)
+                            source = (self._head_source.get(fb_head)
+                                      if fb_head is not None else None)
+                            if fb_head is None or not self.head_uses_ace(fb_head):
                                 pass
-                            elif not (source and source['ace_index']
-                                    != self._active_device_index):
+                            elif not (source and source['ace_index'] != idx):
 
                                 override_a = self._override_for(idx, i)
                                 if override_a is not None:
@@ -5120,21 +5165,23 @@ class MultiAce:
                                     push_brand   = new_slot.get('brand', 'Generic')
                                     push_subtype = new_slot.get('subtype', '')
                                 logging.info(self._t('msg.find_rfid_fallback',
-                                    slot=self._disp(i), head=i))
+                                    slot=self._disp(i), head=fb_head))
                                 logging.info(self._t('msg.raw_slot_dump', slot=new_slot))
-                                self._expect_ptc_push(i, push_type, push_color, push_brand, push_subtype)
-                                self.gcode.run_script_from_command(
-                                    'SET_PRINT_FILAMENT_CONFIG '
-                                    'CONFIG_EXTRUDER=%d '
-                                    'FILAMENT_TYPE="%s" '
-                                    'FILAMENT_COLOR_RGBA=%s '
-                                    'VENDOR="%s" '
-                                    'FILAMENT_SUBTYPE="%s"' % (
-                                        i, push_type, push_color, push_brand, push_subtype))
+                                self._ptc_push_guarded(
+                                    fb_head, push_type, push_color, push_brand,
+                                    push_subtype, 'rfid-fallback')
                     gate_list = self._gate_status_per_ace.setdefault(
                         idx, [GATE_UNKNOWN] * 4)
                     gate_list[i] = GATE_EMPTY if self._is_empty_status(new_slot.get('status')) else GATE_AVAILABLE
                 self._info_per_ace[idx] = result
+
+                if not self._is_v2_idx(idx):
+                    try:
+                        self._v1_check_fa_health(idx, result)
+                    except Exception as _e:
+                        logging.info(
+                            '[multiACE] V1 FA health check failed ACE %d: %s'
+                            % (idx, _e))
 
                 if idx == self._active_device_index:
                     self._info = result
@@ -5166,12 +5213,13 @@ class MultiAce:
                                 target_heads = self._get_heads_for_ace_slot(
                                     idx, slot_idx)
 
-                                if (is_active and not target_heads and slot_idx < 4
-                                        and self.head_uses_ace(slot_idx)):
-
-                                    src = self._head_source.get(slot_idx)
-                                    if not src:
-                                        target_heads = [slot_idx]
+                                if not target_heads:
+                                    fb_head = self._display_head_for_slot(
+                                        idx, slot_idx, is_active)
+                                    if (fb_head is not None
+                                            and self.head_uses_ace(fb_head)
+                                            and not self._head_source.get(fb_head)):
+                                        target_heads = [fb_head]
                                 if override is not None:
                                     push_type = override.get('material') or slot.get('type', 'PLA')
                                     push_color = self._override_color_to_rgba(override.get('color', ''))
@@ -5189,7 +5237,6 @@ class MultiAce:
                                     want_color = want_color[:6]
                                 want_sub = self._norm_subtype(push_subtype)
                                 for head in target_heads:
-
                                     if not self.head_uses_ace(head):
                                         continue
                                     cur_type = ptc_types[head] if head < len(ptc_types) else ''
@@ -5200,7 +5247,8 @@ class MultiAce:
                                     if len(cur_color_cmp) == 8:
                                         cur_color_cmp = cur_color_cmp[:6]
                                     needs_heal = (cur_type != want_type
-                                                  or cur_vendor != want_vendor
+                                                  or self._norm_vendor(cur_vendor)
+                                                  != self._norm_vendor(want_vendor)
                                                   or cur_color_cmp != want_color
                                                   or self._norm_subtype(cur_sub) != want_sub)
                                     want_key = (want_type, want_vendor,
@@ -5222,23 +5270,38 @@ class MultiAce:
                                                 'FILAMENT_SUBTYPE="%s"' % (
                                                     head, push_type, push_color, push_vendor, push_subtype))
                                             self._heal_official_skip.pop(head, None)
+                                            self._heal_fail_count.pop(head, None)
                                         except Exception as phe:
                                             m = str(phe)
-                                            if 'not configurable' in m or 'official' in m:
-
+                                            if ('not configurable' in m
+                                                    or 'official' in m
+                                                    or 'filament_spool_id' in m):
                                                 self._heal_official_skip[head] = want_key
+                                                self._heal_fail_count.pop(head, None)
                                                 logging.info(
-                                                    '[multiACE] display heal: head %d filament is '
-                                                    'official/locked (not configurable) - skipping '
-                                                    'repush until the tag changes' % head)
+                                                    '[multiACE] display heal: head %d push rejected '
+                                                    '(%s) - skipping repush until the identity '
+                                                    'changes' % (head, m))
                                             else:
-                                                logging.info(
-                                                    '[multiACE] display heal error: %s' % m)
+                                                prev_key, cnt = self._heal_fail_count.get(
+                                                    head, (None, 0))
+                                                cnt = cnt + 1 if prev_key == want_key else 1
+                                                self._heal_fail_count[head] = (want_key, cnt)
+                                                if cnt >= HEAL_MAX_FAILS:
+                                                    self._heal_official_skip[head] = want_key
+                                                    self._heal_fail_count.pop(head, None)
+                                                    logging.warning(
+                                                        '[multiACE] display heal: head %d rejected '
+                                                        '%d times, giving up until the identity '
+                                                        'changes: %s' % (head, cnt, m))
+                                                else:
+                                                    logging.info(
+                                                        '[multiACE] display heal error (%d/%d): %s'
+                                                        % (cnt, HEAL_MAX_FAILS, m))
                     except Exception as he:
                         logging.info('[multiACE] display heal error: %s' % he)
             try:
                 self.send_request_to(idx, {"method": "get_status"}, callback)
-                self._request_v2_feedinfo(idx)
             except Exception as he:
                 logging.info('[multiACE] Heartbeat[%d] send failed: %s' % (idx, str(he)))
             return eventtime + 1.0
@@ -5289,8 +5352,18 @@ class MultiAce:
             timeout = max(timeout, 60.0)
         deadline = time.monotonic() + timeout
         reconnect_count = 0
+        feeding_waits = 0
         while info.get('status') != 'ready':
             if time.monotonic() > deadline:
+
+                if (feeding_waits < WAIT_ACE_FEEDING_MAX
+                        and self._v2_any_slot_active(idx)):
+                    feeding_waits += 1
+                    self.log_always(self._t('msg.ace_wait_busy_feeding',
+                        ace=self._disp(idx), attempt=feeding_waits,
+                        max=WAIT_ACE_FEEDING_MAX))
+                    deadline = time.monotonic() + timeout
+                    continue
 
                 if reconnect_count >= max_reconnects:
                     self.log_error(self._t('msg.ace_stuck_powercycle',
@@ -5305,6 +5378,17 @@ class MultiAce:
                     ace=self._disp(idx), timeout=timeout,
                     status=info.get('status', '?'),
                     attempt=reconnect_count, max=max_reconnects))
+                try:
+                    bg = self.printer.lookup_object('ace_bg_swap', None)
+                    bg_state = (sorted(getattr(bg, '_busy', ()))
+                                if bg is not None else 'n/a')
+                    logging.error(
+                        '[multiACE][DBG] wait_ace_ready_on(idx=%d) timeout: '
+                        'active=%d bg_busy_heads=%s caller chain:\n%s'
+                        % (idx, self._active_device_index, bg_state,
+                           ''.join(traceback.format_stack(limit=10)[:-1])))
+                except Exception:
+                    pass
                 try:
                     self._disconnect_from(idx)
                 except Exception:
@@ -5350,8 +5434,6 @@ class MultiAce:
     cmd_ACE_START_DRYING_help = 'Starts ACE Pro dryer'
 
     def cmd_ACE_START_DRYING(self, gcmd):
-        if self._is_printing_or_paused():
-            raise gcmd.error(self._t('msg.dry_blocked_printing'))
         temperature = gcmd.get_int('TEMP')
         duration = gcmd.get_int('DURATION', 240)
 
@@ -5383,11 +5465,20 @@ class MultiAce:
             self.log_always(self._t('msg.ace_not_available', ace=self._disp(ace_idx)))
             return
 
-        # A user stop is also an explicit auto-dry disarm.  Humidity checks
-        # must not restart this ACE until ACE_AUTO_DRY_SET ENABLE=1 is sent.
-        self._v2_auto_dry_enabled[ace_idx] = False
-        self._v2_auto_dry_active.discard(ace_idx)
+        disable_auto = bool(gcmd.get_int('DISABLE_AUTO', 0, minval=0, maxval=1))
+        if disable_auto:
+            self._v2_auto_dry_enabled[ace_idx] = False
+            self._v2_auto_dry_active.discard(ace_idx)
+        self._v2_manual_dry_active.pop(ace_idx, None)
+        self._v2_dry_paused_by_print.pop(ace_idx, None)
+        self._v2_fan_running[ace_idx] = False
+        self._v2_exhaust_pending.pop(ace_idx, None)
+        # Do not treat ACE2's short start/stop valve pulse as a valve-state
+        # readback. A user stop always returns the card to its closed state.
+        self._v2_exhaust_open[ace_idx] = False
+        self._set_v2_exhaust(ace_idx, False, require_dryer=True)
         self._persist_v2_auto_dry_armed()
+
         self._wait_homing_clear()
 
         def callback(self, response):
@@ -5402,8 +5493,23 @@ class MultiAce:
                 ace=self._disp(ace_idx)))
 
         self.wait_ace_ready_on(ace_idx)
-
         self.send_request_to(ace_idx, {"method": "drying_stop"}, callback)
+
+    cmd_ACE_EXHAUST_SET_help = (
+        '[multiACE] Open/close ACE2 drying exhaust. '
+        'Usage: ACE_EXHAUST_SET ACE=0 OPEN=1')
+
+    def cmd_ACE_EXHAUST_SET(self, gcmd):
+        ace_idx = gcmd.get_int('ACE', self._active_device_index)
+        is_open = bool(gcmd.get_int('OPEN', minval=0, maxval=1))
+        if (not self._is_v2_idx(ace_idx)
+                or not self._connected_per_ace.get(ace_idx, False)):
+            raise gcmd.error('[multiACE] ACE2 is not available: %d' % ace_idx)
+
+        self.wait_ace_ready_on(ace_idx)
+        # Manual valve control is explicit user action; only dryer-owned
+        # transitions use the ten-second ACE2 firmware guard.
+        self._send_v2_exhaust_now(ace_idx, is_open)
 
     def _enable_feed_assist(self, index):
 
@@ -5445,23 +5551,6 @@ class MultiAce:
             raise gcmd.error('Wrong index')
 
         self._disable_feed_assist(index)
-
-    cmd_ACE_REARM_PRINT_ASSIST_help = (
-        '[multiACE] Force re-send print feed-assist after pause/resume. '
-        'Usage: ACE_REARM_PRINT_ASSIST [HEAD=0..3] [WAIT=0.25] [CLEAR=1] '
-        '[REASON=text]')
-
-    def cmd_ACE_REARM_PRINT_ASSIST(self, gcmd):
-        head = gcmd.get_int('HEAD', -1, minval=-1, maxval=3)
-        wait = gcmd.get_float('WAIT', 0.25, minval=0.0, maxval=5.0)
-        clear = gcmd.get_int('CLEAR', 1, minval=0, maxval=1)
-        reason = gcmd.get('REASON', 'gcode')
-        ok = self._force_rearm_print_assist(
-            head=None if head < 0 else head,
-            reason=reason, wait=wait, clear_all=bool(clear))
-        if not ok:
-            self.gcode.respond_info(
-                '[multiACE] resume rearm skipped (no active ACE head)')
 
     def _feed(self, index, length, speed, how_wait=None):
         def callback(self, response):
@@ -5535,136 +5624,60 @@ class MultiAce:
             callback=callback)
         self.dwell(delay=(length / speed) + 0.1)
 
-    cmd_ACE_TIP_RETRACT_SEGMENT_help = (
-        '[multiACE] Internal synchronized ACE2/extruder tip-form retract. '
-        'Usage: ACE_TIP_RETRACT_SEGMENT HEAD=0 LENGTH=15 SPEED=45')
+    def _first_loaded_slot_for_ace(self, ace_idx):
+        gates = self._gate_status_per_ace.get(ace_idx)
+        if gates:
+            for s in range(len(gates)):
+                if gates[s] == GATE_AVAILABLE:
+                    return s
+        info = self._info_per_ace.get(ace_idx) or {}
+        slots = info.get('slots') or []
+        for s in range(len(slots)):
+            slot = slots[s] if isinstance(slots[s], dict) else {}
+            st = slot.get('status')
+            if st is not None and not self._is_empty_status(st):
+                return s
+        return None
 
-    def cmd_ACE_TIP_RETRACT_SEGMENT(self, gcmd):
-        """Run one reverse-only tip-form segment with finite ACE2 motion.
-
-        V2 rollback-assist mode is deliberately not used here: its firmware
-        enters assist_error when a tip-form transaction spans heater waits or
-        cooling dwells.  A finite mode=1 rollback ends in `ready` after every
-        segment, so idle periods cannot accumulate continuous-assist time.
-        """
-        head = gcmd.get_int('HEAD', minval=0, maxval=3)
-        length = gcmd.get_float('LENGTH', minval=0.1, maxval=100.0)
-        extruder_speed = gcmd.get_float(
-            'SPEED', minval=0.5, maxval=100.0)
-        ace_length = max(1, int(round(length)))
-        ace_speed = max(1, int(round(extruder_speed)))
-
-        source = self._head_source.get(head)
-        use_v2 = False
-        ace_idx = self._active_device_index
-        slot = head
-        if source is not None and self.head_uses_ace(head):
-            ace_idx = int(source.get('ace_index', ace_idx))
-            slot = int(source.get('slot', head))
-            use_v2 = self._is_v2_idx(ace_idx)
-
-        result = {'done': False, 'ok': False, 'msg': ''}
-        if use_v2:
-            if ace_idx != self._active_device_index:
-                raise gcmd.error(
-                    '[multiACE] tip retract source ACE %d is not active'
-                    % ace_idx)
-
-            self._v2_active_rev_assist = False
-            status = self._v2_get_slot_status(ace_idx, slot)
-            if status in V2_FA_RUNNING_STATES:
-                def _stop_cb(self, response):
-                    pass
-                self.send_request_to(ace_idx, {
-                    'method': 'stop_feed_assist',
-                    'params': {'index': slot},
-                }, _stop_cb)
-                stop_deadline = self.reactor.monotonic() + 3.0
-                while (self._v2_get_slot_status(ace_idx, slot)
-                       in V2_FA_RUNNING_STATES):
-                    if self.reactor.monotonic() >= stop_deadline:
-                        raise gcmd.error(
-                            '[multiACE] ACE2 did not stop assist before tip '
-                            'retract')
-                    self.reactor.pause(self.reactor.monotonic() + 0.1)
-
-            self._clear_fa_cache_for(ace_idx, slot)
-
-            def _rollback_cb(self, response):
-                result['done'] = True
-                result['ok'] = bool(
-                    response and response.get('code', -1) == 0)
-                result['msg'] = ((response or {}).get('msg', '') or '')
-
-            ace_started = self.reactor.monotonic()
-            self.send_request_to(ace_idx, {
-                'method': 'unwind_filament',
-                'params': {
-                    'index': slot,
-                    'length': ace_length,
-                    'speed': ace_speed,
-                },
-            }, _rollback_cb)
-            self._fa_trace(
-                'tip segment finite rollback ACE %d slot %d: %dmm @ %dmm/s'
-                % (ace_idx, slot, ace_length, ace_speed))
-
-        self.gcode.run_script_from_command(
-            'G1 E-%.3f F%.1f' % (length, extruder_speed * 60.0))
-        self.toolhead.wait_moves()
-
-        if use_v2:
-            # Command acceptance is immediate and the cached status may still
-            # read `ready` briefly. Enforce the physical segment duration
-            # before accepting the final slot state.
-            min_finish = (ace_started
-                          + (float(ace_length) / float(ace_speed)) + 0.25)
-            if self.reactor.monotonic() < min_finish:
-                self.reactor.pause(min_finish)
-            self.wait_ace_ready_on(ace_idx)
-            settle_deadline = self.reactor.monotonic() + 3.0
-            while (self._v2_get_slot_status(ace_idx, slot)
-                   in V2_FA_RUNNING_STATES):
-                if self.reactor.monotonic() >= settle_deadline:
-                    try:
-                        self.send_request_to(ace_idx, {
-                            'method': 'stop_feed_assist',
-                            'params': {'index': slot},
-                        }, None)
-                    except Exception:
-                        pass
-                    raise gcmd.error(
-                        '[multiACE] ACE2 finite tip rollback did not settle')
-                self.reactor.pause(self.reactor.monotonic() + 0.1)
-            response_deadline = self.reactor.monotonic() + 2.0
-            while not result['done']:
-                if self.reactor.monotonic() >= response_deadline:
+    def _armed_slot_for_ace(self, ace_idx):
+        s = self._feed_assist_per_ace.get(ace_idx, -1)
+        if isinstance(s, int) and 0 <= s <= 3:
+            return s
+        if self._is_v2_idx(ace_idx):
+            for s in range(4):
+                try:
+                    if self._v2_get_slot_status(ace_idx, s) in V2_FA_RUNNING_STATES:
+                        return s
+                except Exception:
                     break
-                self.reactor.pause(self.reactor.monotonic() + 0.05)
-            if not result['done'] or not result['ok']:
-                raise gcmd.error(
-                    '[multiACE] ACE2 finite tip rollback failed: %s'
-                    % (result['msg'] or 'no successful response'))
-            status = self._v2_get_slot_status(ace_idx, slot)
-            if status == 'assist_error':
-                raise gcmd.error(
-                    '[multiACE] ACE2 entered assist_error after finite tip '
-                    'rollback')
-            self._fa_trace(
-                'tip segment complete ACE %d slot %d status=%s'
-                % (ace_idx, slot, status))
+        return None
 
     def _ace_slot_for_head(self, head):
-
         src = self._head_source.get(head)
         if src is not None:
             s = src.get('slot')
             if isinstance(s, int) and 0 <= s <= 3:
+                if getattr(self, '_armed_slot_logged', None):
+                    self._armed_slot_logged.pop(head, None)
+                return s
+        if getattr(self, '_ace_mode', 'multi') == 'head' and self.head_uses_ace(head):
+            ace_idx = self.head_ace_for(head)
+            s = self._armed_slot_for_ace(ace_idx)
+            if s is None:
+                s = self._first_loaded_slot_for_ace(ace_idx)
+            else:
+                if not hasattr(self, '_armed_slot_logged'):
+                    self._armed_slot_logged = {}
+                if self._armed_slot_logged.get(head) != (ace_idx, s):
+                    self._armed_slot_logged[head] = (ace_idx, s)
+                    logging.info('[multiACE] _ace_slot_for_head: head %d has '
+                                 'no head_source - using ACE %d ARMED slot %d '
+                                 '(FA still running)' % (head, ace_idx, s))
+            if s is not None:
                 return s
         return head
 
     def _resolve_retract_length(self, slot):
-
         if self._retract_length_override is not None:
             return self._retract_length_override
         return self.get_retract_length(self._active_device_index, slot)
@@ -5790,6 +5803,42 @@ class MultiAce:
         -> display shows 'Basic' -> mismatch -> push again)."""
         s = (s or '').strip().lower()
         return '' if s in ('', 'basic', 'generic') else s
+
+    def _norm_vendor(self, v):
+        """Companion to _norm_subtype for the VENDOR comparison: '' and
+        'Generic' are the same identity ('' is what an override/brandless RFID
+        carries as SOLL, 'Generic' is what _norm_vendor_push canonicalises on
+        the WRITE into print_task_config). Without this the display heal loops
+        at 1 Hz forever: SOLL vendor '' vs stored 'Generic' -> mismatch ->
+        repush '' -> the SET_PRINT_FILAMENT_CONFIG wrapper normalises it back
+        to 'Generic' -> mismatch again (HW 2026-07-10: 2549 heal pushes in one
+        session, 1/s per head). Same class as the _norm_subtype loop above."""
+        s = (v or '').strip().lower()
+        return '' if s in ('', 'generic') else s
+
+    def _norm_vendor_push(self, v):
+        """Canonicalise a generic-equivalent vendor to the DB-valid 'Generic'
+        on the way INTO print_task_config, so every head carrying the same
+        generic material stores a BYTE-IDENTICAL vendor string. The stock
+        auto-replenish match (print_task_config.py, black box) compares
+        vendor/type/subtype byte-exact between the ran-out head's backup and the
+        candidates; a head stored '' vs another stored 'Generic' failed to match
+        even at identical colour+material (2026-07-08 'cannot auto replenish'
+        with a same-colour PLA head loaded). Real brands (Bambu/Sunlu/...) and
+        the stock RFID sentinel 'NONE' pass through unchanged. NOT '' - the
+        canonical form must stay a valid DB key (get_load_temp('Generic',...),
+        §5), and 'Generic'/'Basic' is what 3 of 4 heads + the DB already have."""
+        s = (v or '').strip().lower()
+        return 'Generic' if s in ('', 'generic') else v
+
+    def _norm_subtype_push(self, s):
+        """Companion to _norm_vendor_push: a generic-equivalent subtype ->
+        'Basic' (get_load_temp('Generic','PLA','Basic') -> 250, §5). Real
+        subtypes (Matte/Silk/CF/...) pass through unchanged. Distinct from
+        _norm_subtype above, which canonicalises to '' for COMPARISON - this one
+        emits the DB-valid 'Basic' for the WRITE into print_task_config."""
+        v = (s or '').strip().lower()
+        return 'Basic' if v in ('', 'basic', 'generic') else s
 
     @staticmethod
     def _is_empty_status(status):
@@ -5966,6 +6015,121 @@ class MultiAce:
         if len(self._expected_ptc_pushes) > 32:
             self._expected_ptc_pushes = self._expected_ptc_pushes[-32:]
 
+    def _ptc_push_guarded(self, head, ftype, color_rgba, vendor, subtype, ctx):
+        """Push one head's filament identity, tolerating a rejection.
+
+        Used by the two RFID pushes that are NOT part of the display heal:
+        the fresh rfid==2 transition and the unloaded-head fallback. Both
+        used to call run_script_from_command bare, inside the heartbeat's
+        response callback - and the response dispatcher does not guard
+        callbacks either, so a rejected push escaped into a reactor
+        context, which can end in a printer shutdown: a WORSE outcome than
+        the heal's popup loop for the very same firmware rejection.
+
+        Rejections are also negative-cached per head on the pushed
+        identity: the fallback runs on EVERY heartbeat, so without this a
+        rejection there would block the touchscreen with a fresh level-3
+        popup every second - catching the exception alone does not help,
+        the firmware raises it before we see it.
+        """
+        key = (str(ftype or ''), str(color_rgba or ''),
+               str(vendor or ''), str(subtype or ''))
+        if self._ptc_push_block.get(head) == key:
+            return False
+        self._expect_ptc_push(head, ftype, color_rgba, vendor, subtype)
+        try:
+            self.gcode.run_script_from_command(
+                'SET_PRINT_FILAMENT_CONFIG '
+                'CONFIG_EXTRUDER=%d '
+                'FILAMENT_TYPE="%s" '
+                'FILAMENT_COLOR_RGBA=%s '
+                'VENDOR="%s" '
+                'FILAMENT_SUBTYPE="%s"' % (
+                    head, ftype, color_rgba, vendor, subtype))
+            self._ptc_push_block.pop(head, None)
+            return True
+        except Exception as e:
+            self._ptc_push_block[head] = key
+            logging.warning(
+                '[multiACE] %s push for head %d rejected - not repeating it '
+                'for this identity: %s' % (ctx, head, e))
+            return False
+
+    def _ptc_spool_id_for(self, head):
+        """The spool id currently configured on a head, 0 if none.
+
+        Stock 1.5.2 only. Returns 0 on anything older (no such field), on a
+        head without one, or if print_task_config cannot be read - so a
+        machine that never sees a spool id behaves exactly as before.
+        """
+        try:
+            ptc = self.printer.lookup_object('print_task_config', None)
+            if ptc is None:
+                return 0
+            ids = (getattr(ptc, 'print_task_config', None)
+                   or {}).get('filament_spool_id') or []
+            return int(ids[head]) if 0 <= head < len(ids) else 0
+        except Exception:
+            return 0
+
+    def _ptc_official_for(self, head):
+        """True when stock has flagged this head as an official spool.
+
+        Set from an RFID read (filament_detect stamps OFFICIAL for any
+        identity that arrives with parameters) and cleared only by a
+        SUCCESSFUL set - an unload does NOT clear it, so a head can stay
+        flagged from a spool that is long gone.
+        """
+        try:
+            ptc = self.printer.lookup_object('print_task_config', None)
+            if ptc is None:
+                return False
+            flags = (getattr(ptc, 'print_task_config', None)
+                     or {}).get('filament_official') or []
+            return bool(flags[head]) if 0 <= head < len(flags) else False
+        except Exception:
+            return False
+
+    def _ptc_identity_unchanged(self, head, params):
+        """Does this push carry the identity the head already shows?
+
+        Decides whether an existing spool id may ride along. Same identity =
+        we are only refreshing what is there, so the binding still describes
+        the filament and is preserved. DIFFERENT identity = another spool is
+        in that head, the binding would now point at the wrong one - we leave
+        the id out and let stock clear it, rather than keep a link that lies.
+        """
+        try:
+            ptc = self.printer.lookup_object('print_task_config', None)
+            cfg = getattr(ptc, 'print_task_config', None) or {}
+
+            def _cur(key):
+                v = cfg.get(key) or []
+                return str(v[head]) if 0 <= head < len(v) else ''
+            return (str(params.get('FILAMENT_TYPE', '') or '').strip('"')
+                        == _cur('filament_type')
+                    and str(params.get('FILAMENT_COLOR_RGBA', '') or ''
+                            ).upper().lstrip('#')
+                        == _cur('filament_color_rgba').upper().lstrip('#'))
+        except Exception:
+            return False
+
+    def _match_expected_push(self, incoming):
+        """Index of the recorded push matching this command, else None.
+
+        Peeked BEFORE the stock handler runs (to decide whether to carry a
+        spool id) and popped after, so the comparison lives in one place.
+        """
+        norm_sub = self._norm_subtype(incoming.get('subtype', ''))
+        for i, exp in enumerate(self._expected_ptc_pushes):
+            if (exp['head'] == incoming['head']
+                    and exp['type'] == incoming['type']
+                    and exp['color'] == incoming['color']
+                    and exp['vendor'] == incoming['vendor']
+                    and self._norm_subtype(exp.get('subtype', '')) == norm_sub):
+                return i
+        return None
+
     def _wrap_set_print_filament_config(self, gcmd):
         """Replacement handler for SET_PRINT_FILAMENT_CONFIG. Always
         chains to the original print_task_config handler first so the
@@ -5974,7 +6138,88 @@ class MultiAce:
         display-driven user edit and persists it as an override."""
 
         if self._orig_set_ptc is not None:
-            self._orig_set_ptc(gcmd)
+            params = gcmd.get_command_parameters()
+            saved = None
+            _ph = int(gcmd.get_int('CONFIG_EXTRUDER', -1))
+            _skip_push = False
+            if self._match_expected_push({
+                    'head':    _ph,
+                    'type':    str(gcmd.get('FILAMENT_TYPE', '') or ''),
+                    'color':   str(gcmd.get('FILAMENT_COLOR_RGBA', '')
+                                   or '').upper().lstrip('#'),
+                    'vendor':  str(gcmd.get('VENDOR', '') or ''),
+                    'subtype': str(gcmd.get('FILAMENT_SUBTYPE', '') or ''),
+                }) is not None:
+                if 'FILAMENT_SPOOL_ID' not in params:
+                    _sid = self._ptc_spool_id_for(_ph)
+                    if _sid > 0 and self._ptc_identity_unchanged(_ph, params):
+                        saved = dict(params)
+                        params['FILAMENT_SPOOL_ID'] = str(_sid)
+                        logging.info(
+                            '[multiACE] head %d keeps spool id %d - same '
+                            'identity, the binding still fits'
+                            % (self._disp(_ph), _sid))
+                    elif _sid > 0:
+                        logging.info(
+                            '[multiACE] head %d drops spool id %d - a '
+                            'different filament is in it now, the binding '
+                            'would point at the wrong spool'
+                            % (self._disp(_ph), _sid))
+                _official = self._ptc_official_for(_ph)
+                if not _official:
+                    self._force_official_count.pop(_ph, None)
+                elif self._identity_priority == 'spoollink':
+                    _skip_push = True
+                    logging.info(
+                        '[multiACE] head %d is flagged official - leaving it '
+                        'to SpoolLink (identity_priority=spoollink)'
+                        % self._disp(_ph))
+                elif ('FORCE' not in params
+                        and self._identity_priority == 'multiace'
+                        and self.head_uses_ace(_ph)):
+                    _n = self._force_official_count.get(_ph, 0)
+                    if _n < FORCE_OFFICIAL_MAX:
+                        if saved is None:
+                            saved = dict(params)
+                        params['FORCE'] = '1'
+                        self._force_official_count[_ph] = _n + 1
+                        logging.info(
+                            '[multiACE] head %d is flagged official - forcing '
+                            'our identity through (identity_priority=multiace)'
+                            % self._disp(_ph))
+                    elif _n == FORCE_OFFICIAL_MAX:
+                        self._force_official_count[_ph] = _n + 1
+                        logging.warning(
+                            '[multiACE] head %d keeps coming back as official '
+                            'after %d forced pushes - something is re-stamping '
+                            'it. Leaving it alone; set identity_priority: '
+                            'spoollink to stop trying.'
+                            % (self._disp(_ph), FORCE_OFFICIAL_MAX))
+            if str(params.get('FILAMENT_TYPE', '') or '').strip():
+                nv = (self._norm_vendor_push(params.get('VENDOR'))
+                      if 'VENDOR' in params else None)
+                ns = (self._norm_subtype_push(params.get('FILAMENT_SUBTYPE'))
+                      if 'FILAMENT_SUBTYPE' in params else None)
+                if ((nv is not None and nv != params.get('VENDOR'))
+                        or (ns is not None
+                            and ns != params.get('FILAMENT_SUBTYPE'))):
+                    if saved is None:
+                        saved = dict(params)
+                    if nv is not None:
+                        params['VENDOR'] = nv
+                    if ns is not None:
+                        params['FILAMENT_SUBTYPE'] = ns
+            try:
+                if _skip_push:
+                    pass
+                elif saved is not None and self._raw_set_ptc is not None:
+                    self._raw_set_ptc(gcmd)
+                else:
+                    self._orig_set_ptc(gcmd)
+            finally:
+                if saved is not None:
+                    params.clear()
+                    params.update(saved)
         try:
             head = gcmd.get_int('CONFIG_EXTRUDER', None)
             if head is None:
@@ -5986,15 +6231,10 @@ class MultiAce:
                 'vendor':  str(gcmd.get('VENDOR', '') or ''),
                 'subtype': str(gcmd.get('FILAMENT_SUBTYPE', '') or ''),
             }
-            norm_sub = self._norm_subtype(incoming.get('subtype', ''))
-            for i, exp in enumerate(self._expected_ptc_pushes):
-                if (exp['head'] == incoming['head']
-                        and exp['type'] == incoming['type']
-                        and exp['color'] == incoming['color']
-                        and exp['vendor'] == incoming['vendor']
-                        and self._norm_subtype(exp.get('subtype', '')) == norm_sub):
-                    self._expected_ptc_pushes.pop(i)
-                    return
+            _i = self._match_expected_push(incoming)
+            if _i is not None:
+                self._expected_ptc_pushes.pop(_i)
+                return
 
             self._capture_display_edit(incoming)
         except Exception as e:
@@ -6020,12 +6260,10 @@ class MultiAce:
             return
         head = int(ev['head'])
         if not self.head_uses_ace(head):
-
             self._fa_trace(
                 'display edit for head %d ignored (no ACE slot: manual or '
                 'feeder)' % head)
             return
-
         if (ev.get('vendor') or '').strip().upper() == 'NONE':
             self._fa_trace(
                 'display edit for head %d ignored (VENDOR=NONE = stock RFID '
@@ -6039,9 +6277,13 @@ class MultiAce:
             ace_idx = int(src.get('ace_index', 0))
             slot_idx = int(src.get('slot', 0))
         else:
-
-            ace_idx = self._active_device_index
-            slot_idx = head
+            if getattr(self, '_ace_mode', 'multi') == 'head':
+                ace_idx = self.head_ace_for(head)
+                _s = self._first_loaded_slot_for_ace(ace_idx)
+                slot_idx = _s if _s is not None else head
+            else:
+                ace_idx = self._active_device_index
+                slot_idx = head
 
         key = '%d_%d' % (ace_idx, slot_idx)
         existing = self._slot_overrides.get(key) or {}
@@ -6078,7 +6320,6 @@ class MultiAce:
 
         merged_material = inc_type or existing.get('material') or ptc_type
         merged_brand = inc_vendor or existing.get('brand') or ptc_vendor
-
         if inc_type:
             merged_subtype = inc_subtype
         else:
@@ -6108,6 +6349,105 @@ class MultiAce:
                 ace_idx, slot_idx, new_override))
         self._save_slot_overrides()
 
+    def _head_port_hall_state(self, head):
+        """Read the local feed-port Hall state for one print head.
+
+        ``filament_detected`` on a filament-feed object is intentionally the
+        ACE gate state in ACE mode.  The inlet Hall signal needed for mapping
+        cleanup is exposed by the feed-port object itself, so read that local
+        value directly instead of treating an ACE slot as proof that material
+        is still in the head.
+        """
+        try:
+            module, channel = self.EXTRUDER_MAP[int(head)]
+            feed = self.printer.lookup_object(
+                'filament_feed %s' % module, None)
+            ports = getattr(feed, '_port', None) if feed is not None else None
+            port = ports[channel] if ports is not None and channel < len(ports) else None
+            if port is None:
+                return None
+            return bool(port.get_filament_detected_local())
+        except Exception:
+            return None
+
+    def _head_end_sensor_state(self, head):
+        try:
+            sensor = self.printer.lookup_object(
+                'filament_motion_sensor e%d_filament' % int(head), None)
+            if sensor is None:
+                return None
+            return bool(sensor.get_status(0).get('filament_detected'))
+        except Exception:
+            return None
+
+    def _head_mapping_feed_busy(self, head):
+        """Do not clear a mapping while a load/unload operation owns a port."""
+        if self._swap_in_progress or getattr(self, '_in_internal_load_head', False):
+            return True
+        try:
+            module, channel = self.EXTRUDER_MAP[int(head)]
+            feed = self.printer.lookup_object(
+                'filament_feed %s' % module, None)
+            if feed is None:
+                return False
+            if getattr(feed, 'channel_active', None) is not None:
+                return True
+            state = str((getattr(feed, 'channel_state', []) or [])[channel])
+            active_prefixes = (
+                'preload_prepare', 'preload_feeding',
+                'load_prepare', 'load_homing', 'load_picking',
+                'load_heating', 'load_feeding', 'load_extruding',
+                'load_flushing', 'unload_prepare', 'unload_homing',
+                'unload_picking', 'unload_heating', 'unload_heat_finish',
+                'unload_doing', 'manual_sta_',
+            )
+            return state.startswith(active_prefixes)
+        except Exception:
+            return False
+
+    def _head_mapping_monitor_tick(self, eventtime):
+        """Release stale head mappings after the inlet and end sensors clear.
+
+        During a print (including a paused runout) the source mapping is kept
+        so the existing ACE feed-assist recovery can reload the same slot.  At
+        idle, a stable empty Hall/end-sensor pair means the material is really
+        gone, so clear the source and refresh the display without requiring a
+        failed unload command first.
+        """
+        try:
+            now = self.reactor.monotonic()
+            changed = []
+            for head in range(4):
+                source = self._head_source.get(head)
+                if source is None or not self.head_uses_ace(head):
+                    self._head_mapping_empty_since.pop(head, None)
+                    continue
+                hall = self._head_port_hall_state(head)
+                end_sensor = self._head_end_sensor_state(head)
+                if (hall is None or hall or end_sensor is True
+                        or self._head_mapping_feed_busy(head)
+                        or self._is_printing_or_paused()):
+                    self._head_mapping_empty_since.pop(head, None)
+                    continue
+                started = self._head_mapping_empty_since.setdefault(head, now)
+                if now - started < HEAD_MAPPING_EMPTY_SETTLE:
+                    continue
+                self._head_source[head] = None
+                self._head_mapping_empty_since.pop(head, None)
+                changed.append(head)
+            if changed:
+                self._save_head_source()
+                self._refresh_filament_exist_flags()
+                self._push_rfid_info()
+                self._sync_ptc_to_active_ace()
+                logging.info(
+                    '[multiACE] cleared empty head mapping(s): %s '
+                    '(inlet Hall and end sensor are clear)',
+                    ', '.join('T%d' % h for h in changed))
+        except Exception as e:
+            logging.info('[multiACE] head mapping monitor failed: %s', e)
+        return eventtime + HEAD_MAPPING_MONITOR_INTERVAL
+
     def _refresh_filament_exist_flags(self):
         """Recompute print_task_config.filament_exist from the live toolhead
         sensors. The Snapmaker display shows "/" (no filament) for a head only
@@ -6130,12 +6470,11 @@ class MultiAce:
         logging.info('[multiACE] _push_rfid_info: active_device=%d, head_source=%s' % (
             self._active_device_index, str({k: (v['ace_index'] if v else None) for k, v in self._head_source.items()})))
         active = self._active_device_index
-
         self._refresh_filament_exist_flags()
 
         lines = []
+        backup_heads = []
         for head in range(4):
-
             if not self.head_uses_ace(head):
                 logging.info(
                     '[multiACE] _push_rfid_info: head %d - non-ACE '
@@ -6174,8 +6513,8 @@ class MultiAce:
                         'VENDOR="%s" '
                         'FILAMENT_SUBTYPE="%s"' % (
                             head, push_type, push_color, push_brand, push_subtype))
+                    backup_heads.append(head)
                 else:
-
                     rfid_type = source.get('type') or (
                         slot.get('type', '') if slot.get('rfid') == 2 else '')
                     if not rfid_type:
@@ -6200,21 +6539,32 @@ class MultiAce:
                             'VENDOR="%s" '
                             'FILAMENT_SUBTYPE="%s"' % (
                                 head, rfid_type, fallback_color, fallback_brand, fallback_subtype))
+                        backup_heads.append(head)
             else:
 
-                empty_override = self._override_for(active, head)
+                if getattr(self, '_ace_mode', 'multi') == 'head':
+                    disp_ace = self.head_ace_for(head)
+                    disp_slot = head
+                    _s = self._first_loaded_slot_for_ace(disp_ace)
+                    if _s is not None:
+                        disp_slot = _s
+                else:
+                    disp_ace = active
+                    disp_slot = head
+
+                empty_override = self._override_for(disp_ace, disp_slot)
                 if empty_override is not None:
-                    ace_info = self._info_per_ace.get(active, {}) or {}
+                    ace_info = self._info_per_ace.get(disp_ace, {}) or {}
                     aslots = ace_info.get('slots', []) or []
-                    aslot = aslots[head] if head < len(aslots) else {}
+                    aslot = aslots[disp_slot] if disp_slot < len(aslots) else {}
                     push_type = empty_override.get('material') or aslot.get('type', 'PLA')
                     push_color = self._override_color_to_rgba(empty_override.get('color', ''))
                     push_brand = empty_override.get('brand') or aslot.get('brand', 'Generic')
                     push_subtype = empty_override.get('subtype', '') or ''
                     logging.info(
                         '[multiACE] _push_rfid_info: head %d - unloaded, '
-                        'pushing override (active ACE %d / slot %d)' % (
-                            head, active, head))
+                        'pushing override (ACE %d / slot %d)' % (
+                            head, disp_ace, disp_slot))
                     self._expect_ptc_push(head, push_type, push_color, push_brand, push_subtype)
                     lines.append(
                         'SET_PRINT_FILAMENT_CONFIG '
@@ -6225,10 +6575,9 @@ class MultiAce:
                         'FILAMENT_SUBTYPE="%s"' % (
                             head, push_type, push_color, push_brand, push_subtype))
                     continue
-
-                ace_info = self._info_per_ace.get(active, {}) or {}
+                ace_info = self._info_per_ace.get(disp_ace, {}) or {}
                 aslots = ace_info.get('slots', []) or []
-                aslot = aslots[head] if head < len(aslots) else {}
+                aslot = aslots[disp_slot] if disp_slot < len(aslots) else {}
                 if aslot.get('rfid') == 2:
                     push_type = aslot.get('type', 'PLA')
                     push_color = self.rgb2hex(*aslot.get('color', (0, 0, 0)))
@@ -6236,7 +6585,7 @@ class MultiAce:
                     push_subtype = aslot.get('subtype', '')
                     logging.info(
                         '[multiACE] _push_rfid_info: head %d - unloaded, '
-                        'pushing active ACE %d slot RFID' % (head, active))
+                        'pushing ACE %d slot %d RFID' % (head, disp_ace, disp_slot))
                     self._expect_ptc_push(head, push_type, push_color, push_brand, push_subtype)
                     lines.append(
                         'SET_PRINT_FILAMENT_CONFIG '
@@ -6257,8 +6606,23 @@ class MultiAce:
                     'FILAMENT_COLOR_RGBA=000000FF '
                     'VENDOR="" '
                     'FILAMENT_SUBTYPE=""' % head)
-        if lines:
-            self.gcode.run_script_from_command('\n'.join(lines))
+        for _ln in lines:
+            try:
+                self.gcode.run_script_from_command(_ln)
+            except Exception as pe:
+                logging.info(
+                    '[multiACE] _push_rfid_info: one head refused, '
+                    'continuing with the rest: %s' % pe)
+        if backup_heads:
+            ptc = self.printer.lookup_object('print_task_config', None)
+            if ptc is not None:
+                for _bh in backup_heads:
+                    try:
+                        ptc.backup_filament_info(_bh)
+                    except Exception as e:
+                        logging.info(
+                            '[multiACE] replenish backup sync failed head '
+                            '%d: %s' % (_bh, e))
 
     cmd_MULTIACE_REFRESH_OVERRIDES_help = (
         '[multiACE] Reload slot_overrides.json and push to display')
@@ -6266,6 +6630,117 @@ class MultiAce:
     def cmd_MULTIACE_REFRESH_OVERRIDES(self, gcmd):
         self._refresh_slot_overrides()
         self._push_rfid_info()
+
+    cmd_ACE_SET_PICKUP_CLEANING_help = (
+        '[multiACE] Enable/disable Pickup-Cleaning (ENABLE=0|1). Live + '
+        'persisted as ace__pickup_cleaning.')
+
+    def cmd_ACE_SET_PICKUP_CLEANING(self, gcmd):
+        enable = bool(gcmd.get_int('ENABLE', 1, minval=0, maxval=1))
+        self._pickup_cleaning = enable
+        try:
+            if self.save_variables:
+                self.save_variable('ace__pickup_cleaning', enable, write=True)
+        except Exception as e:
+            logging.info('[multiACE] persist ace__pickup_cleaning failed: %s'
+                         % e)
+        self.log_always('[multiACE] Pickup-Cleaning %s'
+                        % ('ON' if enable else 'OFF'))
+
+    cmd_ACE_PICKUP_CLEAN_help = (
+        '[multiACE] Short nozzle wipe at the discard position after a bare-T '
+        'tool pickup (HEAD=n). No-op unless Pickup-Cleaning is enabled. The '
+        'preflight stamps this after picks that have no other cleaning move.')
+
+    def cmd_ACE_PICKUP_CLEAN(self, gcmd):
+        if not getattr(self, '_pickup_cleaning', False):
+            return
+        head = gcmd.get_int('HEAD', None)
+        try:
+            ps = self.printer.lookup_object('print_stats', None)
+            printing = (ps is not None and ps.get_status(
+                self.reactor.monotonic()).get('state') == 'printing')
+        except Exception:
+            printing = False
+        if not printing or self._swap_in_progress:
+            return
+        self.log_always('[multiACE] Pickup-Cleaning: nozzle wipe at the discard '
+                        'position (head %s)'
+                        % (self._disp(head) if head is not None else '?'))
+        self._discard_wipe(head, 'pickup-clean')
+
+    def _discard_wipe(self, head, tag):
+        """Shared discard-wipe excursion (Z hop -> discard -> stock ooze-cutoff
+        wipe -> pos/E restore). Callers: ACE_PICKUP_CLEAN and the post-resume
+        no-op wipe. Fail-open; returns True when the wipe ran."""
+        try:
+            homed = self.toolhead.get_status(
+                self.reactor.monotonic()).get('homed_axes', '')
+        except Exception:
+            homed = ''
+        if not all(a in homed for a in 'xyz'):
+            logging.info('[multiACE] [%s] axes not homed (%s) - '
+                         'skipped' % (tag, homed or 'none'))
+            return False
+        try:
+            heater = self.toolhead.get_extruder().get_heater()
+            if not bool(getattr(heater, 'can_extrude', True)):
+                logging.info('[multiACE] [%s] below min_extrude_temp '
+                             '- skipped' % tag)
+                return False
+        except Exception:
+            pass
+        gcode_move = self.printer.lookup_object('gcode_move')
+        saved_pos = self.toolhead.get_position()[:3]
+        saved_speed = gcode_move.speed
+        saved_absolute = gcode_move.absolute_coord
+        saved_e_base = gcode_move.base_position[3]
+        saved_e_last = gcode_move.last_position[3]
+        _added_suppress = (head is not None
+                           and head not in self._runout_suppress_heads)
+        if _added_suppress:
+            self._runout_suppress_heads.add(head)
+        try:
+            self.gcode.run_script_from_command('G91')
+            self.gcode.run_script_from_command('G1 Z2 F600')
+            self.gcode.run_script_from_command('G90')
+            self.gcode.run_script_from_command(
+                'MOVE_TO_DISCARD_FILAMENT_POSITION')
+            self.toolhead.wait_moves()
+            self.gcode.run_script_from_command(
+                'INNER_ROUGHLY_CLEAN_NOZZLE_BASE_DISCARD ACTION=2')
+            self.toolhead.wait_moves()
+            logging.info('[multiACE] [%s] nozzle wipe done (head %s)'
+                         % (tag, self._disp(head) if head is not None else '?'))
+            _wipe_ok = True
+        except Exception as e:
+            logging.info('[multiACE] [%s] wipe failed (continuing): '
+                         '%s' % (tag, e))
+            _wipe_ok = False
+        finally:
+            if _added_suppress:
+                self._runout_suppress_heads.discard(head)
+            try:
+                e_diff = gcode_move.last_position[3] - saved_e_last
+                gcode_move.base_position[3] = saved_e_base + e_diff
+                self.gcode.run_script_from_command('G90')
+                self.gcode.run_script_from_command(
+                    'G0 Z%.3f F600' % (saved_pos[2] + 3.0))
+                self.gcode.run_script_from_command(
+                    'G0 Y%.3f F12000' % saved_pos[1])
+                self.gcode.run_script_from_command(
+                    'G0 X%.3f F12000' % saved_pos[0])
+                self.gcode.run_script_from_command(
+                    'G0 Z%.3f F600' % (saved_pos[2] + 2.0))
+                self.toolhead.wait_moves()
+                if saved_absolute:
+                    self.gcode.run_script_from_command('G90')
+                self.gcode.run_script_from_command(
+                    'G1 F%d' % (saved_speed * 60))
+            except Exception as re:
+                logging.info('[multiACE] [%s] pos restore failed: %s'
+                             % (tag, re))
+        return _wipe_ok
 
     def cmd_ACE_SWITCH(self, gcmd):
         target = gcmd.get_int('TARGET')
@@ -6321,7 +6796,6 @@ class MultiAce:
                 return
 
             current_slot = self._feed_assist_per_ace.get(self._active_device_index, -1)
-
             preserve_print_fa = False
             if current_slot != -1 and self._auto_feed_enabled and not autoload:
                 try:
@@ -6354,12 +6828,20 @@ class MultiAce:
             if autoload:
                 self.log_always(self._t('msg.switch_unloading_from',
                     ace=self._disp(self._active_device_index)))
+                _target_gates = self._gate_status_per_ace.get(
+                    target, [GATE_UNKNOWN] * 4)
                 for gate in range(4):
                     sensor = self.printer.lookup_object(
                         'filament_motion_sensor e%d_filament' % gate, None)
                     filament_in_head = sensor and sensor.get_status(0)['filament_detected']
                     module, channel = self.EXTRUDER_MAP[gate]
-                    if filament_in_head:
+                    no_replacement = (gate < len(_target_gates)
+                                      and _target_gates[gate] == GATE_EMPTY)
+                    if filament_in_head and no_replacement:
+                        self.log_always(self._t('msg.switch_skip_unload_no_replacement',
+                            head=self._disp(gate), ace=self._disp(target),
+                            slot=self._disp(gate)))
+                    elif filament_in_head:
                         logging.info(self._t('msg.switch_extruder_full_unload',
                             head=gate))
                         self.gcode.run_script_from_command(
@@ -6392,7 +6874,6 @@ class MultiAce:
                 if filament_in_head:
                     logging.info(self._t('msg.switch_extruder_already_loaded',
                         head=gate))
-
                 elif self.gate_status[self._ace_slot_for_head(gate)] == GATE_AVAILABLE:
                     module, channel = self.EXTRUDER_MAP[gate]
                     logging.info(self._t('msg.switch_extruder_loading',
@@ -6420,6 +6901,40 @@ class MultiAce:
                 heads.append(head)
         return heads
 
+    def _source_for_ace_slot(self, ace_index, slot):
+        """Build a persisted head source, preferring the Web material edit.
+
+        ``SAVE_VARIABLE`` receives this value through Klipper's G-code parser,
+        where ``#`` starts a comment.  Web picker colours include ``#``, so
+        persist a plain RRGGBB value just like RFID-derived sources do.
+        """
+        info = self._info_per_ace.get(ace_index, {}) or {}
+        slots = info.get('slots', []) or []
+        slot_info = slots[slot] if 0 <= slot < len(slots) else {}
+        override = self._override_for(ace_index, slot) or {}
+        return {
+            'ace_index': ace_index,
+            'slot': slot,
+            'type': override.get('material') or slot_info.get('type', ''),
+            'subtype': override.get('subtype') or slot_info.get('subtype', ''),
+            'color': str(override.get('color') or self.rgb2hex(
+                *slot_info.get('color', (0, 0, 0)))).lstrip('#'),
+            'brand': override.get('brand') or slot_info.get('brand', ''),
+        }
+
+    def _repairable_slots(self, ace_index):
+        """Return occupied ACE slots with usable material identity."""
+        info = self._info_per_ace.get(ace_index, {}) or {}
+        slots = info.get('slots', []) or []
+        result = []
+        for slot, slot_info in enumerate(slots[:4]):
+            override = self._override_for(ace_index, slot) or {}
+            if (slot_info.get('rfid', 0) or override.get('material')
+                    or override.get('color') or slot_info.get('type')
+                    or slot_info.get('brand')):
+                result.append(slot)
+        return result
+
     def _restore_head_source(self):
 
         saved = self.save_variables.allVariables.get(self.VARS_ACE_HEAD_SOURCE, None)
@@ -6444,8 +6959,7 @@ class MultiAce:
             return
         if head is None or head < 0 or head >= 4:
             return
-
-        if self.head_is_manual(head):
+        if not self.head_uses_ace(head):
             return
         ace_index = self._active_device_index
         src = self._head_source.get(head)
@@ -6461,20 +6975,12 @@ class MultiAce:
             return
         if src is not None:
             return
+        target_slot = self._ace_slot_for_head(head)
         info = self._info_per_ace.get(ace_index) or {}
         slots = info.get('slots') or []
-        target_slot = None
-        for s in slots:
-            ss = s.get('slot_status')
-            if ss in ('feeding', 'preloading', 'ready') and not self._is_empty_status(s.get('status')):
-                target_slot = s.get('index')
-                break
-        if target_slot is None:
-            self._fa_log.info(
-                '[load-hook] external load on head=%d but no slot inferable '
-                '(module=%s channel=%s)' % (head, module, channel))
-            return
-        slot_info = slots[target_slot] if target_slot < len(slots) else {}
+        slot_info = (slots[target_slot]
+                     if isinstance(target_slot, int) and 0 <= target_slot < len(slots)
+                     else {})
         self._head_source[head] = {
             'ace_index': ace_index,
             'slot': target_slot,
@@ -6487,15 +6993,24 @@ class MultiAce:
         except Exception as e:
             logging.info('[multiACE] notify_external_load save failed: %s' % e)
         self._fa_log.info(
-            '[load-hook] external load INFERRED: head=%d -> ace=%d slot=%d '
-            '(module=%s channel=%s)' % (
+            '[load-hook] external load resolved: head=%d -> ace=%d slot=%d '
+            '(_ace_slot_for_head; module=%s channel=%s)' % (
                 head, ace_index, target_slot, module, channel))
 
     def _save_head_source(self):
 
         save_data = {}
         for head in range(4):
-            save_data[str(head)] = self._head_source[head]
+            source = self._head_source[head]
+            if isinstance(source, dict):
+                # G-code treats '#' as a comment marker. Normalise maps saved
+                # by older builds too, not only new source-repair mappings.
+                source = source.copy()
+                color = source.get('color')
+                if isinstance(color, str):
+                    source['color'] = color.lstrip('#')
+                    self._head_source[head]['color'] = source['color']
+            save_data[str(head)] = source
 
         value_str = (json.dumps(save_data)
                      .replace(': true', ': True')
@@ -6511,19 +7026,77 @@ class MultiAce:
         except (TypeError, ValueError):
             return False
 
-    def head_uses_ace(self, head):
+    def head_is_feeder(self, head):
+        if getattr(self, '_ace_mode', 'multi') != 'head':
+            return False
+        try:
+            return bool(self.head_feeder.get(int(head), False))
+        except (TypeError, ValueError):
+            return False
 
+    def head_uses_ace(self, head):
         if self.head_is_manual(head):
             return False
         if getattr(self, '_ace_mode', 'multi') == 'head':
-            try:
-                return int(head) == self._ace_head
-            except (TypeError, ValueError):
-                return False
+            return not self.head_is_feeder(head)
         return True
 
-    def _ensure_extruder_change_handler(self):
+    def head_ace_for(self, head):
+        if getattr(self, '_ace_mode', 'multi') != 'head':
+            try:
+                return int(head)
+            except (TypeError, ValueError):
+                return 0
+        try:
+            return int(self.head_ace.get(int(head), int(head)))
+        except (TypeError, ValueError):
+            return 0
 
+    def _ensure_active_ace_for_head(self, head):
+        if getattr(self, '_ace_mode', 'multi') != 'head':
+            return self._active_device_index
+        if not self.head_uses_ace(head):
+            return self._active_device_index
+        src = self._head_source.get(head)
+        if src is not None and isinstance(src.get('ace_index'), int):
+            target = int(src['ace_index'])
+        else:
+            target = self.head_ace_for(head)
+        if target == self._active_device_index:
+            return target
+        if target < 0 or target >= len(self._ace_devices) \
+                or not self._connected_per_ace.get(target, False):
+            logging.info(
+                '[multiACE] head %d wired to ACE %d but not connected - '
+                'keeping active ACE %d' % (head, target, self._active_device_index))
+            return self._active_device_index
+        self._set_active_idx(target)
+        logging.info(
+            '[multiACE] head %d -> active ACE %d (head-mode per-head wiring)'
+            % (head, target))
+        return target
+
+    def _head_for_ace(self, ace_idx):
+        if getattr(self, '_ace_mode', 'multi') != 'head':
+            return None
+        for h in range(4):
+            if self.head_uses_ace(h) and self.head_ace_for(h) == ace_idx:
+                return h
+        return None
+
+    def _display_head_for_slot(self, ace_idx, slot_idx, is_active):
+        if getattr(self, '_ace_mode', 'multi') == 'head':
+            h = self._head_for_ace(ace_idx)
+            if h is None or not self.head_uses_ace(h):
+                return None
+            show = self._first_loaded_slot_for_ace(ace_idx)
+            show = show if show is not None else h
+            return h if slot_idx == show else None
+        if is_active and slot_idx < 4 and self.head_uses_ace(slot_idx):
+            return slot_idx
+        return None
+
+    def _ensure_extruder_change_handler(self):
         if self._extruder_handler_registered:
             return
         self.printer.register_event_handler(
@@ -6553,19 +7126,99 @@ class MultiAce:
         head = gcmd.get_int('HEAD', minval=0, maxval=3)
         enable = gcmd.get_int('ENABLE', minval=0, maxval=1)
         was_manual = self.head_is_manual(head)
-
         if bool(enable) != was_manual and self._head_is_loaded(head):
             raise gcmd.error(
                 self._t('msg.head_manual_loaded', head=self._disp(head)))
         self.head_manual[head] = bool(enable)
         if self.save_variables:
             self._save_head_manual()
-
         if enable and not was_manual:
             self._clear_filament_display(head)
         self.log_always(
             '[multiACE] head %d manual mode %s'
             % (head, 'ENABLED' if enable else 'disabled'))
+
+    cmd_ACE_SET_HEAD_FEEDER_help = (
+        '[multiACE] Toggle stock-feeder mode for a head (head mode only). '
+        'Usage: ACE_SET_HEAD_FEEDER HEAD=0..3 ENABLE=0|1. '
+        'When enabled the head loads/unloads via its stock side feeder and the '
+        'ACE never touches it; when disabled the head is ACE-driven. Persisted.')
+
+    def cmd_ACE_SET_HEAD_FEEDER(self, gcmd):
+        head = gcmd.get_int('HEAD', minval=0, maxval=3)
+        enable = gcmd.get_int('ENABLE', minval=0, maxval=1)
+        was_feeder = bool(self.head_feeder.get(head, False))
+        if bool(enable) != was_feeder and self._head_is_loaded(head):
+            raise gcmd.error(
+                self._t('msg.head_manual_loaded', head=self._disp(head)))
+        if not enable and was_feeder \
+                and getattr(self, '_ace_mode', 'multi') == 'head':
+            my_ace = int(self.head_ace.get(head, head))
+            for other in range(4):
+                if other == head:
+                    continue
+                if self.head_manual.get(other, False) \
+                        or self.head_feeder.get(other, False):
+                    continue
+                if int(self.head_ace.get(other, other)) == my_ace:
+                    raise gcmd.error(
+                        '[multiACE] head %d is wired to ACE %d, which head %d '
+                        'already uses - one ACE feeds exactly one head. '
+                        'Rewire head %d first (ACE_SET_HEAD_ACE HEAD=%d '
+                        'ACE=<free>), then disable feeder mode.'
+                        % (self._disp(head), self._disp(my_ace),
+                           self._disp(other), self._disp(head), head))
+        self.head_feeder[head] = bool(enable)
+        if self.save_variables:
+            self._save_head_feeder()
+        if enable and not was_feeder:
+            self._clear_filament_display(head)
+        self.log_always(
+            '[multiACE] head %d feeder mode %s'
+            % (head, 'ENABLED' if enable else 'disabled'))
+
+    cmd_ACE_SET_HEAD_ACE_help = (
+        '[multiACE] Set which ACE feeds an ACE head (head mode). '
+        'Usage: ACE_SET_HEAD_ACE HEAD=0..3 ACE=0..3. '
+        'Each ACE head is wired to exactly one ACE and can only load/swap that '
+        "ACE's slots. Persisted.")
+
+    def cmd_ACE_SET_HEAD_ACE(self, gcmd):
+        head = gcmd.get_int('HEAD', minval=0, maxval=3)
+        ace_idx = gcmd.get_int('ACE', minval=0, maxval=3)
+        if int(self.head_ace.get(head, head)) != ace_idx \
+                and self._head_is_loaded(head):
+            raise gcmd.error(
+                self._t('msg.head_manual_loaded', head=self._disp(head)))
+        _swapped = None
+        for other in range(4):
+            if other == head:
+                continue
+            if self.head_manual.get(other, False) \
+                    or self.head_feeder.get(other, False):
+                continue
+            if int(self.head_ace.get(other, other)) == ace_idx:
+                if self._head_is_loaded(other):
+                    raise gcmd.error(
+                        '[multiACE] ACE %d is wired to head %d, which is '
+                        'LOADED - unload head %d first, then rewire.'
+                        % (self._disp(ace_idx), self._disp(other),
+                           self._disp(other)))
+                self.head_ace[other] = int(self.head_ace.get(head, head))
+                _swapped = other
+                break
+        self.head_ace[head] = ace_idx
+        if self.save_variables:
+            self._save_head_ace()
+        if _swapped is not None:
+            self.log_always(
+                '[multiACE] head %d -> ACE %d (swapped: head %d -> ACE %d)'
+                % (head, self._disp(ace_idx), self._disp(_swapped),
+                   self._disp(self.head_ace[_swapped])))
+        else:
+            self.log_always(
+                '[multiACE] head %d -> ACE %d'
+                % (head, self._disp(ace_idx)))
 
     cmd_ACE_SET_PURGE_help = (
         '[multiACE] Set the swap/load flush length (mm) for the next '
@@ -6608,8 +7261,68 @@ class MultiAce:
             "SAVE_VARIABLE VARIABLE=%s VALUE='%s'"
             % (self.VARS_ACE_HEAD_MANUAL, value_str))
 
+    def _restore_head_feeder(self):
+        saved = self.save_variables.allVariables.get(
+            self.VARS_ACE_HEAD_FEEDER, None)
+        if saved and isinstance(saved, dict):
+            for head in range(4):
+                key = str(head)
+                if key in saved:
+                    self.head_feeder[head] = bool(saved[key])
+                    if self.head_feeder[head]:
+                        logging.info(
+                            '[multiACE] Restored head %d -> feeder mode' % head)
+            return
+        legacy = self.save_variables.allVariables.get(self.VARS_ACE_HEAD, None)
+        if legacy is not None:
+            for head in range(4):
+                self.head_feeder[head] = (head != self._ace_head)
+            logging.info(
+                '[multiACE] Migrated legacy head mode (ACE head %d) -> per-head '
+                'feeder flags' % self._ace_head)
+
+    def _save_head_feeder(self):
+        save_data = {str(h): bool(self.head_feeder[h]) for h in range(4)}
+        value_str = (json.dumps(save_data)
+                     .replace(': true', ': True')
+                     .replace(': false', ': False'))
+        self.gcode.run_script_from_command(
+            "SAVE_VARIABLE VARIABLE=%s VALUE='%s'"
+            % (self.VARS_ACE_HEAD_FEEDER, value_str))
+
+    def _restore_head_ace(self):
+        saved = self.save_variables.allVariables.get(
+            self.VARS_ACE_HEAD_ACE, None)
+        if saved and isinstance(saved, dict):
+            for head in range(4):
+                key = str(head)
+                if key in saved:
+                    try:
+                        a = int(saved[key])
+                        if 0 <= a <= 3:
+                            self.head_ace[head] = a
+                    except (TypeError, ValueError):
+                        pass
+            return
+        legacy = self.save_variables.allVariables.get(self.VARS_ACE_HEAD, None)
+        if legacy is not None:
+            self.head_ace[self._ace_head] = self.HEAD_MODE_ACE
+            logging.info(
+                '[multiACE] Migrated legacy combiner head %d -> ACE %d'
+                % (self._ace_head, self.HEAD_MODE_ACE))
+
+    def _save_head_ace(self):
+        save_data = {str(h): int(self.head_ace[h]) for h in range(4)}
+        value_str = json.dumps(save_data)
+        self.gcode.run_script_from_command(
+            "SAVE_VARIABLE VARIABLE=%s VALUE='%s'"
+            % (self.VARS_ACE_HEAD_ACE, value_str))
+
     def _ensure_ace_available(self, ace_index):
 
+        if (0 <= ace_index < len(self._ace_devices)
+                and self._connected_per_ace.get(ace_index, False)):
+            return True
         for attempt in range(5):
             self._refresh_ace_devices('ensure_%d' % (attempt + 1))
             if self._is_ace_present(ace_index):
@@ -6688,9 +7401,15 @@ class MultiAce:
             return
 
         if not self.head_uses_ace(head_index):
-
             self._fa_trace('_on_extruder_change: head %d does not use ACE '
                            '(feeder/manual) - skip FA' % head_index)
+            return
+
+        bg = self.printer.lookup_object('ace_bg_swap', None)
+        if bg is not None and bg.is_busy(head_index):
+            self._fa_trace('_on_extruder_change: head %d has a RUNNING bg '
+                           'unload - skip FA arm (swap will wait + re-arm on '
+                           'load)' % head_index)
             return
 
         target_ace = source['ace_index']
@@ -6778,12 +7497,561 @@ class MultiAce:
             'ace_changed': prev_active != target_ace,
         })
 
+    def _wait_bg_op(self, head, gcmd=None):
+        bg = self.printer.lookup_object('ace_bg_swap', None)
+        if bg is None:
+            return
+        try:
+            busy = bg.is_busy(head)
+        except Exception:
+            return
+        if not busy:
+            return
+        self.log_always('[multiACE] head %d: waiting for the background '
+                        'unload to finish before the feed op'
+                        % self._disp(head))
+        deadline = self.reactor.monotonic() + 300.
+        while self.reactor.monotonic() < deadline:
+            try:
+                if not bg.is_busy(head):
+                    self.log_always('[multiACE] head %d: background unload '
+                                    'finished - continuing'
+                                    % self._disp(head))
+                    self._rearm_fa_after_bg_wait(head)
+                    return
+            except Exception:
+                return
+            self.reactor.pause(self.reactor.monotonic() + 0.5)
+        msg = ('[multiACE] head %d: background unload did not finish '
+               'within 300s' % self._disp(head))
+        if gcmd is not None:
+            raise gcmd.error(msg)
+        self.log_error(msg)
+
+    def _rearm_fa_after_bg_wait(self, head):
+        try:
+            if not self._auto_feed_enabled:
+                return
+            ext = self.toolhead.get_extruder()
+            cur_head = getattr(ext, 'extruder_index',
+                               getattr(ext, 'extruder_num', None))
+            if cur_head != head or not self.head_uses_ace(head):
+                return
+            source = self._head_source.get(head)
+            if not source:
+                return
+            self._ensure_active_ace_for_head(head)
+            self._arm_fa_for(source['ace_index'], source['slot'])
+            self._fa_trace('FA re-armed after bg-op wait: head=%d ace=%d '
+                           'slot=%d' % (head, source['ace_index'],
+                                        source['slot']))
+        except Exception as e:
+            logging.info('[multiACE] FA re-arm after bg wait failed: %s' % e)
+
+    def _bg_pick_flow_check(self, head, anti_ooze):
+        self._bg_load_unverified.discard(head)
+        _bg = self.printer.lookup_object('ace_bg_swap', None)
+        gate_on = bool(getattr(_bg, 'pick_gate', False))
+        _deficit = getattr(self, '_bg_prime_deficit', {}).pop(head, None)
+        try:
+            ext = self.toolhead.get_extruder()
+            heater = ext.get_heater()
+            if not bool(getattr(heater, 'can_extrude', True)):
+                logging.info('[multiACE] [pick-check] head %d skipped: below '
+                             'min_extrude_temp' % head)
+                if _deficit is not None:
+                    self._bg_prime_deficit[head] = _deficit
+                return
+            sensor = self.printer.lookup_object(
+                'filament_motion_sensor e%d_filament' % head, None)
+            def _detected():
+                try:
+                    return bool(sensor is not None and
+                                sensor.get_status(0).get('filament_detected'))
+                except Exception:
+                    return None
+            try:
+                homed = self.toolhead.get_status(
+                    self.reactor.monotonic()).get('homed_axes', '')
+            except Exception:
+                homed = ''
+            if not all(a in homed for a in 'xyz'):
+                self._bg_load_unverified.add(head)
+                if _deficit is not None:
+                    self._bg_prime_deficit[head] = _deficit
+                self.log_always('[multiACE] [pick-check] head %d: axes not '
+                                'homed (%s) - skipped, re-armed for the next '
+                                'arrival (home first for an idle test)'
+                                % (self._disp(head), homed or 'none'))
+                return
+            sensor_before = _detected()
+            if sensor_before is False:
+                logging.info('[multiACE] [pick-check] head %d: sensor reads '
+                             'ABSENT on a bg-loaded head - skipping the push'
+                             % head)
+                self._wiggle_log.info(
+                    'pickcheck head=%d verdict=SENSOR_ABSENT gate=%s'
+                    % (head, gate_on))
+                return 'sensor_absent' if gate_on else None
+            coil = None
+            try:
+                coil = ext.binding_probe.sensor
+            except Exception:
+                logging.info('[multiACE] [pick-check] inductance_coil not '
+                             'found - sensor-only check')
+            src = self._head_source.get(head) or {}
+            self.log_always('[multiACE] [pick-check] head %d: verifying the '
+                            'background load (short extrude at the discard '
+                            'position)' % self._disp(head))
+
+            gcode_move = self.printer.lookup_object('gcode_move')
+            saved_pos = self.toolhead.get_position()[:3]
+            saved_speed = gcode_move.speed
+            saved_absolute = gcode_move.absolute_coord
+            saved_e_base = gcode_move.base_position[3]
+            saved_e_last = gcode_move.last_position[3]
+            _added_suppress = head not in self._runout_suppress_heads
+            self._runout_suppress_heads.add(head)
+            coil_start = coil_min = coil_max = None
+            sensor_after = None
+            try:
+                self.gcode.run_script_from_command('G91')
+                self.gcode.run_script_from_command('G1 Z2 F600')
+                self.gcode.run_script_from_command('G90')
+                self.gcode.run_script_from_command(
+                    'MOVE_TO_DISCARD_FILAMENT_POSITION')
+                self.toolhead.wait_moves()
+
+                self.gcode.run_script_from_command('M83')
+                def _measure(push_mm):
+                    c0 = mn = mx = None
+                    if coil is not None:
+                        try:
+                            c0 = coil.get_coil_freq()
+                            mn = mx = c0
+                        except Exception:
+                            c0 = None
+                    self.gcode.run_script_from_command(
+                        'G1 E%.2f F%d' % (push_mm, PICK_CHECK_PUSH_FEEDRATE))
+                    self.reactor.pause(self.reactor.monotonic() + 0.5)
+                    if coil is not None and c0 is not None:
+                        for _i in range(PICK_CHECK_COIL_SAMPLES):
+                            try:
+                                f = coil.get_coil_freq()
+                                mn = min(mn, f)
+                                mx = max(mx, f)
+                            except Exception:
+                                break
+                            self.reactor.pause(self.reactor.monotonic()
+                                               + PICK_CHECK_COIL_INTERVAL)
+                    self.toolhead.wait_moves()
+                    dip = (c0 - mn) if c0 is not None else None
+                    up = (mx - c0) if c0 is not None else None
+                    return c0, mn, mx, dip, up
+                if _deficit is not None:
+                    push = max(float(_deficit) + PICK_CHECK_FLOW_PUSH,
+                               PICK_CHECK_MIN_PUSH)
+                    self.log_always(
+                        '[multiACE] [pick-check] head %d: topping up the '
+                        'cut-short background prime (%d mm)'
+                        % (self._disp(head), int(float(_deficit))))
+                else:
+                    push = max(float(anti_ooze) + PICK_CHECK_FLOW_PUSH,
+                               PICK_CHECK_MIN_PUSH)
+                coil_start, coil_min, coil_max, coil_delta, coil_up = \
+                    _measure(push)
+                if coil_up is not None and coil_up >= PICK_TURBULENCE_UPSWING:
+                    self.log_always(
+                        '[multiACE] [pick-check] head %d: coil TURBULENCE '
+                        '(up=%.0f dip=%s) - settling %.1fs + re-measuring'
+                        % (self._disp(head), coil_up, coil_delta,
+                           PICK_TURBULENCE_SETTLE))
+                    self.reactor.pause(self.reactor.monotonic()
+                                       + PICK_TURBULENCE_SETTLE)
+                    coil_start, coil_min, coil_max, coil_delta, coil_up = \
+                        _measure(PICK_CHECK_MIN_PUSH)
+                regripped = False
+                ace_pushed = None
+                _turbulent = (coil_up is not None
+                              and coil_up >= PICK_TURBULENCE_UPSWING)
+                if (gate_on and coil_delta is not None
+                        and (coil_delta < PICK_CHECK_COIL_THRESHOLD
+                             or _turbulent)):
+                    self.log_always(
+                        '[multiACE] [pick-check] head %d: NO FLOW '
+                        '(delta=%s) - re-gripping %d mm (+ACE push) and '
+                        're-measuring'
+                        % (self._disp(head), coil_delta,
+                           int(PICK_GATE_REGRIP)))
+                    n_idx = src.get('ace_index')
+                    n_slot = src.get('slot')
+                    if (_bg is not None and n_idx is not None
+                            and n_slot is not None):
+                        try:
+                            n_len = (PICK_GATE_ACE_PUSH_V2
+                                     if self._is_v2_idx(n_idx)
+                                     else PICK_GATE_ACE_PUSH_V1)
+                            self._feed_assist_per_ace[n_idx] = -1
+                            _bg._ace_send(self, n_idx, {
+                                'method': 'stop_feed_assist',
+                                'params': {'index': n_slot}})
+                            ace_pushed = False
+                            for _na in range(PICK_GATE_ACE_PUSH_RETRIES):
+                                nresp = _bg._ace_send(self, n_idx, {
+                                    'method': 'feed_filament',
+                                    'params': {
+                                        'index': n_slot,
+                                        'length': int(n_len),
+                                        'speed': int(
+                                            PICK_GATE_ACE_PUSH_SPEED)}})
+                                if not _bg._resp_rejected(nresp):
+                                    ace_pushed = True
+                                    break
+                                if _na < PICK_GATE_ACE_PUSH_RETRIES - 1:
+                                    self.reactor.pause(
+                                        self.reactor.monotonic()
+                                        + PICK_GATE_ACE_PUSH_RETRY_DELAY)
+                        except Exception as ne:
+                            logging.info('[multiACE] [pick-check] ACE push '
+                                         'failed (extruder-only re-grip): '
+                                         '%s' % ne)
+                    self.gcode.run_script_from_command(
+                        'G1 E%.2f F%d' % (PICK_GATE_REGRIP,
+                                          PICK_GATE_REGRIP_FEEDRATE))
+                    self.toolhead.wait_moves()
+                    if ace_pushed is not None:
+                        try:
+                            _bg._ace_send(self, n_idx, {
+                                'method': 'stop_feed_filament',
+                                'params': {'index': n_slot}})
+                            self._arm_fa_for(n_idx, n_slot)
+                        except Exception as ne:
+                            logging.info('[multiACE] [pick-check] FA re-arm '
+                                         'after ACE push failed: %s' % ne)
+                    push = push + PICK_GATE_REGRIP + PICK_CHECK_MIN_PUSH
+                    regripped = True
+                    coil_start, coil_min, coil_max, coil_delta, coil_up = \
+                        _measure(PICK_CHECK_MIN_PUSH)
+                self.reactor.pause(self.reactor.monotonic() + 0.5)
+                sensor_after = _detected()
+                if anti_ooze > 0:
+                    self.gcode.run_script_from_command(
+                        'G1 E-%.2f F1500' % float(anti_ooze))
+                    self.toolhead.wait_moves()
+                if BG_PICK_WIPE:
+                    try:
+                        self.gcode.run_script_from_command(
+                            'INNER_ROUGHLY_CLEAN_NOZZLE_BASE_DISCARD ACTION=2')
+                        self.toolhead.wait_moves()
+                        logging.info('[multiACE] [pick-check] nozzle wipe '
+                                     'done (head %d)' % self._disp(head))
+                    except Exception as we:
+                        logging.info('[multiACE] [pick-check] nozzle wipe '
+                                     'failed (continuing): %s' % we)
+            finally:
+                if _added_suppress:
+                    self._runout_suppress_heads.discard(head)
+                try:
+                    e_diff = gcode_move.last_position[3] - saved_e_last
+                    gcode_move.base_position[3] = saved_e_base + e_diff
+                    self.gcode.run_script_from_command('G90')
+                    self.gcode.run_script_from_command(
+                        'G0 Z%.3f F600' % (saved_pos[2] + 3.0))
+                    self.gcode.run_script_from_command(
+                        'G0 Y%.3f F12000' % saved_pos[1])
+                    self.gcode.run_script_from_command(
+                        'G0 X%.3f F12000' % saved_pos[0])
+                    self.gcode.run_script_from_command(
+                        'G0 Z%.3f F600' % (saved_pos[2] + 2.0))
+                    self.toolhead.wait_moves()
+                    if saved_absolute:
+                        self.gcode.run_script_from_command('G90')
+                    self.gcode.run_script_from_command(
+                        'G1 F%d' % (saved_speed * 60))
+                except Exception as re:
+                    logging.info('[multiACE] [pick-check] pos restore '
+                                 'failed: %s' % re)
+
+            _turbulent = (coil_up is not None
+                          and coil_up >= PICK_TURBULENCE_UPSWING)
+            coil_verdict = ('FLOW' if coil_delta is not None
+                            and coil_delta >= PICK_CHECK_COIL_THRESHOLD
+                            and not _turbulent
+                            else 'NO_FLOW' if coil_delta is not None
+                            else 'NO_COIL')
+            sens_verdict = ('STUCK_OR_GONE' if sensor_after is False
+                            else 'PRESENT' if sensor_after else 'UNKNOWN')
+            _line = ('pickcheck head=%d ace=%s slot=%s anti_ooze=%.1f '
+                     'push=%.1f prime_topup=%s regrip=%s ace_push=%s '
+                     'coil_start=%s '
+                     'coil_min=%s coil_max=%s coil_delta=%s coil_up=%s '
+                     'turbulent=%s thr=%d '
+                     'coil_verdict=%s sensor_before=%s sensor_after=%s '
+                     'sensor_verdict=%s gate=%s'
+                     % (head, src.get('ace_index'), src.get('slot'),
+                        float(anti_ooze), push,
+                        ('%.0f' % float(_deficit)) if _deficit is not None
+                        else '-', regripped, ace_pushed,
+                        coil_start, coil_min, coil_max, coil_delta, coil_up,
+                        _turbulent,
+                        PICK_CHECK_COIL_THRESHOLD, coil_verdict,
+                        sensor_before, sensor_after, sens_verdict, gate_on))
+            self._wiggle_log.info(_line)
+            logging.info('[multiACE] [pick-check] %s' % _line)
+            if gate_on and coil_verdict == 'NO_FLOW':
+                self.log_always(
+                    '[multiACE] [pick-check] head %d: NO FLOW persists '
+                    'after the re-grip (delta=%s) - escalating to pause'
+                    % (self._disp(head), coil_delta))
+                return 'no_flow'
+            self.log_always('[multiACE] [pick-check] head %d: coil %s '
+                            '(delta=%s) / sensor %s%s'
+                            % (self._disp(head), coil_verdict, coil_delta,
+                               sens_verdict,
+                               ' - recovered by re-grip' if regripped
+                               else ''))
+            return None
+        except Exception as e:
+            logging.exception('[multiACE] [pick-check] head %d failed '
+                              '(log-only, swallowed)' % head)
+            try:
+                self.log_always('[multiACE] [pick-check] head %d: check '
+                                'errored (%s) - log-only, print continues'
+                                % (self._disp(head), e))
+            except Exception:
+                pass
+
+    def _tipform_material_for(self, head):
+        try:
+            ptc = self.printer.lookup_object('print_task_config', None)
+            if ptc is not None:
+                types = (ptc.get_status(None) or {}).get('filament_type')
+                if types and 0 <= head < len(types):
+                    t = (types[head] or '').strip()
+                    if t and t.upper() != 'NONE':
+                        return t
+        except Exception:
+            pass
+        src = self._head_source.get(head) or {}
+        return (src.get('type') or '').strip()
+
+    def _tipform_vendor_for(self, head):
+        try:
+            ptc = self.printer.lookup_object('print_task_config', None)
+            if ptc is not None:
+                vendors = (ptc.get_status(None) or {}).get('filament_vendor')
+                if vendors and 0 <= head < len(vendors):
+                    v = (vendors[head] or '').strip()
+                    if v and v.upper() != 'NONE':
+                        return v
+        except Exception:
+            pass
+        src = self._head_source.get(head) or {}
+        return (src.get('brand') or '').strip()
+
+    def tipform_table_for(self, material, vendor=None, soft=False):
+        tf = self.printer.lookup_object('ace_tipform', None)
+        if tf is None:
+            return None
+        try:
+            return tf.table_for(material, vendor=vendor, soft=soft)
+        except Exception:
+            logging.exception('[multiACE] tipform table lookup failed')
+            return None
+
+    def tipform_unload_temp_for(self, head, soft=False):
+        tf = self.printer.lookup_object('ace_tipform', None)
+        if tf is None or not hasattr(tf, 'unload_temp_for'):
+            return None
+        try:
+            return tf.unload_temp_for(self._tipform_material_for(head),
+                                      vendor=self._tipform_vendor_for(head),
+                                      soft=bool(soft))
+        except Exception:
+            logging.exception('[multiACE] tipform unload-temp lookup failed')
+            return None
+
+    def _tipform_send(self, ace_idx, request, timeout=5.0):
+        done = [None]
+
+        def _cb(self, response):
+            done[0] = response if response is not None else {}
+        try:
+            self.send_request_to(ace_idx, request, _cb)
+        except Exception:
+            return None
+        deadline = self.reactor.monotonic() + timeout
+        while done[0] is None and self.reactor.monotonic() < deadline:
+            self.reactor.pause(self.reactor.monotonic() + 0.05)
+        return done[0]
+
+    def _tipform_rejected(self, resp):
+        if not resp:
+            return True
+        if resp.get('code', -1) != 0:
+            return True
+        return str(resp.get('msg', '')).strip().upper() == 'FORBIDDEN'
+
+    def _run_tipform(self, head, temp, soft, nozzle_diameter):
+        material = self._tipform_material_for(head)
+        vendor = self._tipform_vendor_for(head)
+        table = self.tipform_table_for(material, vendor=vendor, soft=bool(soft))
+        if table is None:
+            tf = self.printer.lookup_object('ace_tipform', None)
+            if tf is not None and getattr(tf, 'mode', 'stock') == 'custom':
+                self.log_always(
+                    '[multiACE] head %d: tip form STOCK (custom mode, no '
+                    'table for %s%r; tables: %s)'
+                    % (self._disp(head),
+                       ('%s ' % vendor) if vendor else '',
+                       material or '?',
+                       ', '.join(sorted(getattr(tf, 'tables', {}).keys()))
+                       or 'none'))
+            self.gcode.run_script_from_command(
+                "INNER_FILAMENT_UNLOAD TEMP=%d SOFT=%d NOZZLE_DIAMETER=%f\r\n"
+                % (temp, soft, nozzle_diameter))
+            return
+        _tf_desc = (('%s %s' % (vendor, material)) if vendor and material
+                    else (material.lower() if material else 'default'))
+        _tf_line = ('[multiACE] head %d: custom tip form (%s, %d tokens)'
+                    % (self._disp(head), _tf_desc, len(table)))
+        self.log_always(_tf_line)
+        logging.info(_tf_line)
+        run = self.gcode.run_script_from_command
+        src = self._head_source.get(head) or {}
+        ace_idx = src.get('ace_index')
+        if not isinstance(ace_idx, int):
+            ace_idx = self._active_device_index
+        slot = src.get('slot')
+        if not isinstance(slot, int) or not 0 <= slot <= 3:
+            slot = self._ace_slot_for_head(head)
+        is_v2 = False
+        try:
+            is_v2 = bool(self._is_v2_idx(ace_idx))
+        except Exception:
+            pass
+        unwind_speed = 80
+        try:
+            unwind_speed = int(self.get_retract_speed(ace_idx))
+        except Exception:
+            pass
+        saved_rev_assist = getattr(self, '_v2_active_rev_assist', False)
+        if is_v2:
+            self._v2_active_rev_assist = False
+        fwd_armed = False
+
+        def _tf_fa_start():
+            try:
+                if self._v2_get_slot_status(ace_idx, slot) \
+                        in V2_FA_RUNNING_STATES:
+                    self._feed_assist_per_ace[ace_idx] = slot
+                    return True
+            except Exception:
+                pass
+            for _a in range(3):
+                resp = self._tipform_send(ace_idx, {
+                    'method': 'start_feed_assist', 'params': {'index': slot}})
+                if not self._tipform_rejected(resp):
+                    self._feed_assist_per_ace[ace_idx] = slot
+                    return True
+                self.reactor.pause(self.reactor.monotonic() + 1.0)
+            return False
+
+        def _tf_unwind(ln):
+            for _a in range(3):
+                self._tipform_send(ace_idx, {
+                    'method': 'stop_feed_assist', 'params': {'index': slot}})
+                resp = self._tipform_send(ace_idx, {
+                    'method': 'unwind_filament',
+                    'params': {'index': slot, 'length': int(ln),
+                               'speed': int(unwind_speed)}})
+                if not self._tipform_rejected(resp):
+                    self._feed_assist_per_ace[ace_idx] = -1
+                    return True
+                self.reactor.pause(self.reactor.monotonic() + 2.0)
+            return False
+
+        try:
+            run('MOVE_TO_DISCARD_FILAMENT_POSITION')
+            run('M109 S%d' % int(temp))
+            run('M83')
+            for tok in table:
+                kind = tok[0]
+                if kind == 'move':
+                    mm, feed = float(tok[1]), int(tok[2])
+                    if is_v2 and mm > 0.:
+                        if not fwd_armed:
+                            run('M400')
+                            fwd_armed = _tf_fa_start()
+                        run('G1 E%.3f F%d' % (mm, feed))
+                    elif is_v2 and mm <= -3.:
+                        run('M400')
+                        ln = int(round(-mm))
+                        fwd_armed = False
+                        if not _tf_unwind(ln):
+                            logging.info('[multiACE] tipform: unwind %dmm '
+                                         'rejected - bowden slack (V2 will '
+                                         'brake)' % ln)
+                        run('G1 E%.3f F%d' % (mm, feed))
+                        run('M400')
+                        self.reactor.pause(
+                            self.reactor.monotonic()
+                            + max(1.0, ln / max(unwind_speed, 1) + 0.5))
+                    else:
+                        run('G1 E%.3f F%d' % (mm, feed))
+                elif kind == 'pause':
+                    run('M400')
+                    run('G4 P%d' % int(tok[1] * 1000.))
+                elif kind == 'temp':
+                    run('M104 S%d' % int(tok[1]))
+                elif kind == 'waittemp':
+                    c = float(tok[1])
+                    run('M400')
+                    run('M104 S%d' % int(c))
+                    _h = None
+                    try:
+                        _h = self.printer.lookup_object(
+                            'extruder' if head == 0
+                            else 'extruder%d' % head).get_heater()
+                    except Exception:
+                        pass
+                    if _h is not None:
+                        _wt_deadline = self.reactor.monotonic() + 300.
+                        while True:
+                            _cur, _t = _h.get_temp(self.reactor.monotonic())
+                            if abs(_cur - c) <= 3.:
+                                break
+                            if self.reactor.monotonic() > _wt_deadline:
+                                self.log_always(
+                                    '[multiACE] tipform waittemp:%d not '
+                                    'reached in 300s (at %.0f) - continuing'
+                                    % (int(c), _cur))
+                                break
+                            self.reactor.pause(
+                                self.reactor.monotonic() + 0.5)
+                elif kind == 'fan':
+                    run('M106 S%d' % int(tok[1]))
+        finally:
+            if is_v2:
+                if fwd_armed:
+                    self._tipform_send(ace_idx, {
+                        'method': 'stop_feed_assist',
+                        'params': {'index': slot}})
+                    self._feed_assist_per_ace[ace_idx] = -1
+                self._v2_active_rev_assist = saved_rev_assist
+        run('M400')
+        run('M104 S0')
+        run('M106 S255')
+        run('G4 P5000')
+        run('INNER_CUTOFF_BASE_DISCARD')
+        run('INNER_ROUGHLY_CLEAN_NOZZLE_BASE_DISCARD ACTION=2')
+        run('INNER_DISCARD_FILAMENT_BASE_DISCARD')
+        run('M107')
+
     cmd_ACE_LOAD_HEAD_help = '[multiACE] Load a toolhead from ACE. Usage: ACE_LOAD_HEAD HEAD=0 [ACE=0] [SLOT=0]'
     def cmd_ACE_LOAD_HEAD(self, gcmd):
 
         head = gcmd.get_int('HEAD')
-        ace_index = gcmd.get_int('ACE', self._active_device_index)
-        slot = gcmd.get_int('SLOT', head)
         self._last_load_ok = True
 
         if head < 0 or head > 3:
@@ -6793,16 +8061,55 @@ class MultiAce:
                 '[multiACE] head %d is manual - ACE_LOAD_HEAD ignored, '
                 'load it by hand' % head)
             return
+        self._wait_bg_op(head, gcmd)
+        _hm = (getattr(self, '_ace_mode', 'multi') == 'head'
+               and self.head_uses_ace(head))
+        if _hm:
+            ace_index = gcmd.get_int('ACE', self.head_ace_for(head))
+            slot = gcmd.get_int('SLOT', self._ace_slot_for_head(head))
+        else:
+            ace_index = gcmd.get_int('ACE', self._active_device_index)
+            slot = gcmd.get_int('SLOT', head)
         if ace_index < 0 or not self._ensure_ace_available(ace_index):
             self.log_always(self._t('msg.ace_not_available',
                 ace=self._disp(ace_index)))
             return
         if slot < 0 or slot > 3:
             raise gcmd.error('[multiACE] SLOT must be 0-3')
+        if _hm and ace_index != self.head_ace_for(head):
+            raise gcmd.error(
+                '[multiACE] head %d is wired to ACE %d (one ACE per head) - '
+                'refusing load from ACE %d. Rewire via ACE_SET_HEAD_ACE '
+                'first.' % (self._disp(head),
+                            self._disp(self.head_ace_for(head)),
+                            self._disp(ace_index)))
 
         sensor = self.printer.lookup_object(
             'filament_motion_sensor e%d_filament' % head, None)
-        if sensor and sensor.get_status(0)['filament_detected']:
+        _staged = getattr(self, '_bg_staged', {}).get(head)
+        if _staged is not None and self.head_uses_ace(head):
+            if int(_staged[0]) == int(ace_index) \
+                    and int(_staged[1]) == int(slot):
+                self._bg_staged.pop(head, None)
+                self._bg_left_empty.discard(head)
+                self.log_always(
+                    '[multiACE] head %d: continuing the STAGED background '
+                    'load (ACE %d / Slot %d already at the toolhead sensor)'
+                    % (self._disp(head), self._disp(ace_index),
+                       self._disp(slot)))
+            else:
+                raise gcmd.error(
+                    '[multiACE] head %d has filament of ACE %d / Slot %d '
+                    'STAGED at the sensor but the load targets ACE %d / '
+                    'Slot %d - unload the head first (display/web), then '
+                    'retry' % (self._disp(head), self._disp(_staged[0]),
+                               self._disp(_staged[1]),
+                               self._disp(ace_index), self._disp(slot)))
+        elif sensor and sensor.get_status(0)['filament_detected']:
+            if not self.head_uses_ace(head):
+                self.log_always(self._t('msg.load_head_already_loaded',
+                    head=self._disp(head)))
+                return
             if self._head_source.get(head) is not None:
                 self.log_always(self._t('msg.load_head_already_loaded',
                     head=self._disp(head)))
@@ -6863,6 +8170,7 @@ class MultiAce:
             "SET_FILAMENT_SENSOR SENSOR=e%d_filament ENABLE=1" % head)
 
         ff_module = 'filament_feed %s' % module
+        ff = None
         try:
             ff = self.printer.lookup_object(ff_module, None)
             if ff is None:
@@ -6905,6 +8213,50 @@ class MultiAce:
         finally:
             self._in_internal_load_head = False
 
+        if self.head_uses_ace(head):
+            _load_ok = True
+            _skip_reason = None
+            try:
+                if ff is not None and channel < len(ff.channel_state):
+                    _load_ok = bool(ff.config['load_finish'][channel])
+                    if not _load_ok:
+                        if not ff.config['auto_mode'][channel]:
+                            _skip_reason = 'auto_mode'
+                        else:
+                            _skip_reason = str(ff.channel_state[channel])
+            except Exception as ve:
+                logging.info(
+                    '[multiACE] load_finish verify unavailable: %s' % ve)
+                _load_ok = True
+            if not _load_ok:
+                self._audit_state('LOAD_HEAD_FAILED', {
+                    'head': head, 'ace': ace_index, 'slot': slot,
+                    'reason': 'load_not_finished', 'detail': _skip_reason})
+                try:
+                    src = self._head_source.get(head)
+                    if src is not None:
+                        src['load_failed'] = True
+                        self._save_head_source()
+                except Exception:
+                    pass
+                self._last_load_ok = False
+                if _skip_reason == 'auto_mode':
+                    raise gcmd.error(self._t('msg.load_refused_auto_mode',
+                        head=self._disp(head)))
+                raise gcmd.error(self._t('msg.load_not_finished',
+                    head=self._disp(head), state=_skip_reason))
+
+        if not self.head_uses_ace(head):
+            self._head_source[head] = None
+            self._save_head_source()
+            self._ghost_heads.discard(head)
+            self._refresh_filament_exist_flags()
+            self.log_always(
+                '[multiACE] Head %d loaded via stock feeder (no ACE source)'
+                % self._disp(head))
+            self._audit_state('LOAD_HEAD', {'head': head, 'feeder': True})
+            return
+
         rfid_deadline = self.reactor.monotonic() + 3.0
         while self.reactor.monotonic() < rfid_deadline:
             if self._info['slots'][slot].get('rfid', 0) != 0:
@@ -6939,7 +8291,6 @@ class MultiAce:
             push_subtype = self._head_source[head].get('subtype', '') or ''
             do_push = True
         else:
-
             push_type    = ''
             push_color   = '000000FF'
             push_brand   = ''
@@ -6983,7 +8334,7 @@ class MultiAce:
                 '[multiACE] head %d is manual - ACE_UNLOAD_HEAD ignored, '
                 'unload it by hand' % head)
             return
-
+        self._wait_bg_op(head, gcmd)
         if not self._head_is_loaded(head):
             self.log_always(self._t('msg.unload_head_already_empty',
                 head=self._disp(head)))
@@ -6995,6 +8346,14 @@ class MultiAce:
             logging.info(self._t('msg.unload_sensor_no_filament', head=self._disp(head)))
 
         source = self._head_source.get(head)
+        if source is None:
+            staged = getattr(self, '_bg_staged', {}).pop(head, None)
+            if staged is not None:
+                self._bg_left_empty.discard(head)
+                source = {'ace_index': int(staged[0]), 'slot': int(staged[1])}
+                logging.info('[multiACE] unload head %d: using bg-staged '
+                             'ACE %d slot %d as the source'
+                             % (head, staged[0], staged[1]))
         if source:
             ace_index = source['ace_index']
             slot = source['slot']
@@ -7014,7 +8373,9 @@ class MultiAce:
 
         proto = self._protocols.get(active_idx)
         is_v2 = (proto is not None and getattr(proto, 'NAME', None) == 'v2')
-        if is_v2:
+        if not self.head_uses_ace(head):
+            self._fa_trace('unload: head %d not ACE-driven - skip ACE FA' % head)
+        elif is_v2:
             self._v2_arm_fa_for_unload(head)
             self._fa_trace(
                 'unload skip-stop FA on ACE %d (V2 - velocity tracker '
@@ -7073,13 +8434,24 @@ class MultiAce:
         if machine_state_manager is not None:
             self._machine_state_after_feed_op()
 
-        self._head_source[head] = None
-        self._save_head_source()
+        still_detected = bool(sensor
+                              and sensor.get_status(0)['filament_detected'])
+        unload_verified = (not still_detected
+                           and getattr(self, '_last_unload_ok', True))
+        if unload_verified:
+            self._head_source[head] = None
+            self._save_head_source()
+            self._bg_load_unverified.discard(head)
+            getattr(self, '_bg_prime_deficit', {}).pop(head, None)
         self._push_rfid_info()
         self._sync_ptc_to_active_ace()
 
-        if sensor and sensor.get_status(0)['filament_detected']:
-            self.log_error(self._t('msg.unload_filament_still_detected', head=self._disp(head)))
+        if not unload_verified:
+            if still_detected:
+                self.log_error(self._t('msg.unload_filament_still_detected', head=self._disp(head)))
+            logging.info('[multiACE] UNLOAD_HEAD: keeping head_source[%d] '
+                         '(unload not verified) so a retry targets the right '
+                         'slot' % head)
         else:
             self.log_always(self._t('msg.unload_head_success', head=self._disp(head)))
         self._audit_state('UNLOAD_HEAD', {'head': head})
@@ -7359,7 +8731,6 @@ class MultiAce:
                     'vendor=%r type=%r sub=%r -> get_load_temp=%r'
                     % (head, v, t, s, temp))
                 if temp and temp >= 170:
-
                     try:
                         _en = 'extruder' if head == 0 else 'extruder%d' % head
                         _ex = self.printer.lookup_object(_en, None)
@@ -7413,6 +8784,13 @@ class MultiAce:
         head = gcmd.get_int('HEAD')
         ace_index = gcmd.get_int('ACE')
         slot = gcmd.get_int('SLOT', head)
+        if gcmd.get_int('SKIP_POS_RESTORE', 0):
+            logging.info('[multiACE] Swap: SKIP_POS_RESTORE=1 ignored '
+                         '(deprecated, stale processed gcode) - doing the '
+                         'full pos-restore')
+        anti_ooze = gcmd.get_float(
+            'ANTI_OOZE', float(self.swap_anti_ooze_retract),
+            minval=0., maxval=50.)
 
         if head < 0 or head > 3:
             raise gcmd.error('[multiACE] HEAD must be 0-3')
@@ -7421,10 +8799,19 @@ class MultiAce:
                 '[multiACE] head %d is manual - ACE_SWAP_HEAD ignored, '
                 'load it by hand' % head)
             return
+        self._wait_bg_op(head, gcmd)
         if ace_index < 0 or not self._ensure_ace_available(ace_index):
             raise gcmd.error('ACE %d not available' % ace_index)
         if slot < 0 or slot > 3:
             raise gcmd.error('[multiACE] SLOT must be 0-3')
+        if (getattr(self, '_ace_mode', 'multi') == 'head'
+                and self.head_uses_ace(head)
+                and ace_index != self.head_ace_for(head)):
+            raise gcmd.error(
+                '[multiACE] head %d is wired to ACE %d (one ACE per head) - '
+                'refusing swap on ACE %d. Rewire via ACE_SET_HEAD_ACE first.'
+                % (self._disp(head), self._disp(self.head_ace_for(head)),
+                   self._disp(ace_index)))
         if head in self._ghost_heads:
             raise gcmd.error(
                 '[multiACE] SWAP refused: head %d is a ghost (filament at '
@@ -7452,6 +8839,45 @@ class MultiAce:
                     'SET_HEATER_TEMPERATURE HEATER=%s TARGET=%d' % (heater, swap_temp))
                 self.gcode.run_script_from_command(
                     'TEMPERATURE_WAIT SENSOR=%s MINIMUM=%d' % (heater, swap_temp - 5))
+                _had_pickcheck = head in getattr(self, '_bg_load_unverified', ())
+                if _had_pickcheck:
+                    _pick = self._bg_pick_flow_check(head, anti_ooze)
+                    if _pick == 'no_flow':
+                        self._pause_for_recovery(
+                            gcmd,
+                            detail_msg=self._t('msg.bg_pick_no_flow_pause',
+                                               head=self._disp(head)),
+                            recovery_steps=[
+                                'Check the nozzle / filament path of head '
+                                '%d (no flow despite re-grip)'
+                                    % self._disp(head),
+                                'Purge manually until filament extrudes',
+                                'RESUME                (continue the print)',
+                            ],
+                            code=4,
+                        )
+                    elif _pick == 'sensor_absent':
+                        self._pause_for_recovery(
+                            gcmd,
+                            detail_msg=self._t('msg.bg_pick_absent_pause',
+                                               head=self._disp(head)),
+                            recovery_steps=[
+                                'Load head %d manually (web Load or '
+                                'ACE_LOAD_HEAD)' % self._disp(head),
+                                'RESUME                (continue the print)',
+                            ],
+                            code=4,
+                        )
+                if (self.reactor.monotonic()
+                        < getattr(self, '_resume_wipe_deadline', 0.)):
+                    self._resume_wipe_deadline = 0.
+                    if not _had_pickcheck:
+                        self.log_always(
+                            '[multiACE] Post-resume ooze wipe: head %d sat '
+                            'hot through the pause, no-op swap runs no '
+                            'flush - wiping at the discard edge'
+                            % self._disp(head))
+                        self._discard_wipe(head, 'resume-wipe')
             elif head != active_head:
                 logging.info('[multiACE] Swap: HEAD %d not active toolhead '
                              '(active=%s) - skip pre-heat to avoid holding '
@@ -7513,6 +8939,7 @@ class MultiAce:
 
         self._swap_in_progress = True
         self._swap_phase = 'unload'
+        self._resume_wipe_deadline = 0.
         self._ace_event(
             'swap_imminent', head=head, ace=ace_index, slot=slot,
             from_ace=(prev_ace_src if prev_ace_src is not None else -1),
@@ -7539,14 +8966,17 @@ class MultiAce:
             self._fa_log.info(
                 '[swap-trace] ENTRY head=%d ace=%d slot=%d '
                 'saved_e_base=%.3f saved_e_last=%.3f '
-                'abs_extrude=%s anti_ooze=%d'
+                'abs_extrude=%s anti_ooze=%.2f'
                 % (head, ace_index, slot, saved_e_base, saved_e_last,
                    gcode_move.absolute_extrude,
-                   self.swap_anti_ooze_retract))
+                   anti_ooze))
 
             orig_ext_name = self.toolhead.get_extruder().get_name()
             target_ext = 'extruder' if head == 0 else 'extruder%d' % head
             switched_head = (orig_ext_name != target_ext)
+            self._swap_saved_pos = saved_pos
+            self._swap_orig_ext_name = orig_ext_name
+            self._swap_switched_head = switched_head
             if switched_head:
                 logging.info('[multiACE] Swap: switching to %s (was %s)' % (target_ext, orig_ext_name))
                 self.gcode.run_script_from_command('T%d A0' % head)
@@ -7560,7 +8990,6 @@ class MultiAce:
             except Exception:
                 pass
             logging.info('[multiACE] Swap: saved heater=%d (swap head)' % saved_heater_target)
-
             self._swap_probe_ref_temp = saved_heater_target
 
             prev_ace = self._active_device_index
@@ -7578,13 +9007,29 @@ class MultiAce:
                 'filament_motion_sensor e%d_filament' % head, None)
             sensor_present = (sensor_obj is not None and
                               sensor_obj.get_status(0)['filament_detected'])
-            empty_head = (not sensor_present) and (prev_source is None)
+            bg_empty = head in getattr(self, '_bg_left_empty', ())
+            empty_head = ((not sensor_present) and (prev_source is None)) or bg_empty
 
             if empty_head:
+                if bg_empty:
+                    self._bg_left_empty.discard(head)
+                    staged = getattr(self, '_bg_staged', {}).get(head)
+                    if (staged is not None
+                            and (int(staged[0]) != int(ace_index)
+                                 or int(staged[1]) != int(slot))):
+                        raise gcmd.error(
+                            '[multiACE] head %d has filament of ACE %d / '
+                            'Slot %d STAGED at the sensor but the swap '
+                            'targets ACE %d / Slot %d - unload the head '
+                            'first (display/web), then retry'
+                            % (self._disp(head), self._disp(staged[0]),
+                               self._disp(staged[1]), self._disp(ace_index),
+                               self._disp(slot)))
                 logging.info(
                     '[multiACE] Swap: head %d is empty '
-                    '(sensor=False, head_source=None) - skipping unload, '
-                    'proceeding directly to load' % head)
+                    '(sensor=%s, head_source=%s, bg_left_empty=%s) - skipping '
+                    'unload, proceeding directly to load'
+                    % (head, sensor_present, prev_source is not None, bg_empty))
                 unload_start_ts = time.monotonic()
                 unload_end_ts = unload_start_ts
             else:
@@ -7599,16 +9044,20 @@ class MultiAce:
                     _src_ace = self._active_device_index
                     _src_slot = head
                 swap_rl = self.get_swap_retract_length(_src_ace, _src_slot)
-                if swap_rl > 0:
-                    self.gcode.run_script_from_command(
-                        'ACE_UNLOAD_HEAD HEAD=%d RETRACT_LENGTH=%d KEEP_HEAT=%d' % (
-                            head, swap_rl, swap_temp))
-                    logging.info('[multiACE] Swap: unload done (retract %dmm, heat held @ %d)' % (
-                        swap_rl, swap_temp))
-                else:
-                    self.gcode.run_script_from_command(
-                        'ACE_UNLOAD_HEAD HEAD=%d KEEP_HEAT=%d' % (head, swap_temp))
-                    logging.info('[multiACE] Swap: unload done (per-ACE retract_length, heat held @ %d)' % swap_temp)
+                try:
+                    if swap_rl > 0:
+                        self.gcode.run_script_from_command(
+                            'ACE_UNLOAD_HEAD HEAD=%d RETRACT_LENGTH=%d KEEP_HEAT=%d' % (
+                                head, swap_rl, swap_temp))
+                        logging.info('[multiACE] Swap: unload done (retract %dmm, heat held @ %d)' % (
+                            swap_rl, swap_temp))
+                    else:
+                        self.gcode.run_script_from_command(
+                            'ACE_UNLOAD_HEAD HEAD=%d KEEP_HEAT=%d' % (head, swap_temp))
+                        logging.info('[multiACE] Swap: unload done (per-ACE retract_length, heat held @ %d)' % swap_temp)
+                except Exception:
+                    swap_status = 'unload_failed'
+                    raise
                 unload_end_ts = time.monotonic()
 
                 if not self._last_unload_ok:
@@ -7666,16 +9115,18 @@ class MultiAce:
                 self.gcode.run_script_from_command(
                     'ACE_LOAD_HEAD HEAD=%d ACE=%d SLOT=%d' % (head, ace_index, slot))
             except Exception as load_e:
-
+                swap_status = 'load_failed'
                 logging.info(
                     '[multiACE] Swap LOAD raised before completion: %s '
                     '(routing to swap_back+pos_restore+pause)' % load_e)
                 self._swap_back_to_orig_for_pause(
                     switched_head, orig_ext_name)
                 self._restore_pos_for_pause(saved_pos)
-
-                self._restore_machine_state_for_resume()
-                raise
+                _detail, _steps = self._load_slip_details(
+                    head, ace_index, slot)
+                self._pause_for_recovery(
+                    gcmd, detail_msg=_detail, recovery_steps=_steps)
+                return
             load_end_ts = time.monotonic()
 
             if not self._last_load_ok:
@@ -7683,19 +9134,10 @@ class MultiAce:
                 self._swap_back_to_orig_for_pause(
                     switched_head, orig_ext_name)
                 self._restore_pos_for_pause(saved_pos)
+                _detail, _steps = self._load_slip_details(
+                    head, ace_index, slot)
                 self._pause_for_recovery(
-                    gcmd,
-                    detail_msg=self._t('msg.pause_swap_load_slip',
-                        head=self._disp(head), ace=self._disp(ace_index),
-                        slot=self._disp(slot)),
-                    recovery_steps=[
-                        'ACE_UNLOAD_HEAD HEAD=%d           (clear partial filament)'
-                            % head,
-                        'ACE_LOAD_HEAD HEAD=%d ACE=%d SLOT=%d   (reload)'
-                            % (head, ace_index, slot),
-                        'RESUME                           (continue the print)',
-                    ],
-                )
+                    gcmd, detail_msg=_detail, recovery_steps=_steps)
                 return
 
             logging.info('[multiACE] Swap: load done')
@@ -7706,7 +9148,6 @@ class MultiAce:
             try:
                 self._arm_fa_for(ace_index, slot)
                 self.wait_ace_ready()
-
                 self._v2_schedule_fa_rearm(
                     ace_index, slot, 'post-load-verify', delay=0.20)
                 self._fa_trace('gate RE-OPEN for post-load wipe (context=%s) on ACE %d slot %d' % (
@@ -7724,14 +9165,14 @@ class MultiAce:
                 % (gcode_move.last_position[3],
                    gcode_move.last_position[3] - saved_e_last))
             self.gcode.run_script_from_command('G91')
-            if self.swap_anti_ooze_retract > 0:
+            if anti_ooze > 0:
                 self.gcode.run_script_from_command(
-                    'G1 E-%d F1800' % self.swap_anti_ooze_retract)
+                    'G1 E-%.2f F1800' % anti_ooze)
             self.gcode.run_script_from_command('G90')
             self.toolhead.wait_moves()
             self._fa_log.info(
-                '[swap-trace] POST_ANTI_OOZE_RETRACT last_pos=%.3f anti_ooze=%d'
-                % (gcode_move.last_position[3], self.swap_anti_ooze_retract))
+                '[swap-trace] POST_ANTI_OOZE_RETRACT last_pos=%.3f anti_ooze=%.2f'
+                % (gcode_move.last_position[3], anti_ooze))
 
             if wipe_temp != saved_heater_target:
                 self.gcode.run_script_from_command('M104 S%d' % saved_heater_target)
@@ -7794,15 +9235,18 @@ class MultiAce:
                 head=self._disp(head), ace=self._disp(ace_index), slot=self._disp(slot)))
         finally:
             self._swap_in_progress = False
+            self._swap_saved_pos = None
 
             if self._swap_phase != 'done':
+                swap_fail_status = (swap_status
+                                    if swap_status != 'ok' else 'error')
                 self._last_swap_result = {
                     'head': head, 'ace': ace_index, 'slot': slot,
-                    'status': (swap_status if swap_status != 'ok' else 'error'),
+                    'status': swap_fail_status,
                     'ts': self.reactor.monotonic(),
                 }
                 self._ace_event('swap_failed', head=head, ace=ace_index,
-                                slot=slot, status=swap_status)
+                                slot=slot, status=swap_fail_status)
             self._swap_phase = 'idle'
 
             self._auto_feed_enabled = fa_prev_auto
@@ -7887,6 +9331,16 @@ class MultiAce:
         marker = 'MATCH' if expected_bundle == actual_bundle else 'MISMATCH'
         self.log_always(self._t('msg.bundle_status',
             expected=expected_bundle, actual=actual_bundle, marker=marker))
+
+        _bg = self.printer.lookup_object('ace_bg_swap', None)
+        if _bg is not None:
+            _bg_heads = sorted(getattr(_bg, 'enabled_heads', []) or [])
+            self.log_always('[multiACE] bg-swap %s: enabled heads %s'
+                            % (getattr(_bg, 'version', '?'),
+                               _bg_heads if _bg_heads else 'NONE'))
+        else:
+            self.log_always('[multiACE] bg-swap: not loaded '
+                            '(no [ace_bg_swap] section)')
 
         s = self._usb_stats
         uptime_min = (time.monotonic() - s['start_time']) / 60.0
@@ -8404,8 +9858,91 @@ class MultiAce:
         self._audit_state('CLEAR_HEADS', {'head': head})
         self._sync_ptc_to_active_ace()
 
-    def _push_slot_rfid_to_extruder(self, head):
+    cmd_ACE_REPAIR_HEAD_SOURCE_help = (
+        '[multiACE] Restore an ACE material source for a loaded head. '
+        'Usage: ACE_REPAIR_HEAD_SOURCE HEAD=0 [ACE=0 SLOT=0]. '
+        'Without ACE/SLOT, the normal active ACE/head slot is used when it '
+        'contains material; otherwise exactly one occupied slot is required.')
+    def cmd_ACE_REPAIR_HEAD_SOURCE(self, gcmd):
+        """Restore a mapping that was lost after a transient empty sensor read.
 
+        This command deliberately does not move filament.  It is only valid
+        while idle and with a positive head-end (or inlet Hall) signal, so a
+        stale Web click cannot assign material to an empty toolhead.
+        """
+        head = gcmd.get_int('HEAD', minval=0, maxval=3)
+        requested_ace = gcmd.get_int('ACE', None, minval=0, maxval=3)
+        requested_slot = gcmd.get_int('SLOT', None, minval=0, maxval=3)
+        if (requested_ace is None) != (requested_slot is None):
+            raise gcmd.error('[multiACE] specify both ACE and SLOT, or neither')
+        if self._is_printing_or_paused():
+            raise gcmd.error('[multiACE] cannot repair material source while printing or paused')
+        if not self.head_uses_ace(head):
+            raise gcmd.error('[multiACE] T%d does not use an ACE source' % self._disp(head))
+        if self._head_source.get(head) is not None:
+            self.log_always('[multiACE] T%d already has a material source' % self._disp(head))
+            return
+        end_sensor = self._head_end_sensor_state(head)
+        inlet_hall = self._head_port_hall_state(head)
+        if end_sensor is not True and inlet_hall is not True:
+            raise gcmd.error(
+                '[multiACE] T%d has no filament sensor confirmation; source was not changed'
+                % self._disp(head))
+
+        if requested_ace is None:
+            ace_index = (self.head_ace_for(head)
+                         if getattr(self, '_ace_mode', 'multi') == 'head'
+                         else self._active_device_index)
+            preferred_slot = self._ace_slot_for_head(head)
+            candidates = self._repairable_slots(ace_index)
+            if preferred_slot in candidates:
+                slot = preferred_slot
+            elif len(candidates) == 1:
+                slot = candidates[0]
+            else:
+                raise gcmd.error(
+                    '[multiACE] cannot determine T%d source automatically; '
+                    'select ACE and slot manually' % self._disp(head))
+        else:
+            ace_index, slot = requested_ace, requested_slot
+
+        if ace_index >= len(self._ace_devices) or not self._ensure_ace_available(ace_index):
+            raise gcmd.error('[multiACE] ACE %d is unavailable' % self._disp(ace_index))
+        if slot not in self._repairable_slots(ace_index):
+            raise gcmd.error('[multiACE] ACE %d slot %d has no material information' % (
+                self._disp(ace_index), self._disp(slot)))
+
+        self._head_source[head] = self._source_for_ace_slot(ace_index, slot)
+        self._head_mapping_empty_since.pop(head, None)
+        self._save_head_source()
+        self._refresh_filament_exist_flags()
+        self._push_rfid_info()
+        self._audit_state('REPAIR_HEAD_SOURCE', {
+            'head': head, 'ace': ace_index, 'slot': slot})
+        self.log_always('[multiACE] restored T%d material source: ACE %d / slot %d' % (
+            self._disp(head), self._disp(ace_index), self._disp(slot)))
+
+    cmd_ACE_BREAK_HEAD_SOURCE_help = (
+        '[multiACE] Test-only: remove a toolhead material source mapping without '
+        'moving filament. Usage: ACE_BREAK_HEAD_SOURCE HEAD=0')
+    def cmd_ACE_BREAK_HEAD_SOURCE(self, gcmd):
+        """Create a controlled unknown-source state for repair-flow testing."""
+        head = gcmd.get_int('HEAD', minval=0, maxval=3)
+        if self._is_printing_or_paused():
+            raise gcmd.error('[multiACE] cannot break material source while printing or paused')
+        if self._head_source.get(head) is None:
+            self.log_always('[multiACE] T%d already has no material source' % self._disp(head))
+            return
+        self._head_source[head] = None
+        self._head_mapping_empty_since.pop(head, None)
+        self._save_head_source()
+        self._refresh_filament_exist_flags()
+        self._clear_filament_display(head)
+        self._audit_state('BREAK_HEAD_SOURCE', {'head': head})
+        self.log_always('[multiACE] test: broke T%d material source link (filament unchanged)' % (
+            self._disp(head)))
+
+    def _push_slot_rfid_to_extruder(self, head):
         if not self.head_uses_ace(head):
             return
         try:
@@ -8510,9 +10047,16 @@ class MultiAce:
             if machine_state_manager is not None:
                 self._machine_state_after_feed_op()
 
-            self._head_source[head] = None
-            self._push_slot_rfid_to_extruder(head)
-            unloaded_any = True
+            still = sensor.get_status(0)['filament_detected']
+            if still:
+                self.log_always(self._t('msg.unload_head_failed_warn',
+                    head=self._disp(head),
+                    error='toolhead sensor still detects filament - '
+                          'keeping head_source for a retry'))
+            else:
+                self._head_source[head] = None
+                self._push_slot_rfid_to_extruder(head)
+                unloaded_any = True
 
         if unloaded_any:
             self._save_head_source()
@@ -8550,8 +10094,6 @@ class MultiAce:
 
     cmd_ACE_DRY_help = '[multiACE] Start drying on ACE. Usage: ACE_DRY ACE=0 [TEMP=] [DURATION=]'
     def cmd_ACE_DRY(self, gcmd):
-        if self._is_printing_or_paused():
-            raise gcmd.error(self._t('msg.dry_blocked_printing'))
         ace_idx = gcmd.get_int('ACE')
         if ace_idx < 0 or ace_idx >= len(self._ace_devices):
             self.log_always(self._t('msg.ace_not_available',
@@ -8559,100 +10101,101 @@ class MultiAce:
             return
         temp = gcmd.get_int('TEMP', self.ace_dryer_temp.get(ace_idx, self.dryer_temp))
         duration = gcmd.get_int('DURATION', self.ace_dryer_duration.get(ace_idx, self.dryer_duration))
-        if duration <= 0:
-            raise gcmd.error('Wrong duration')
-        if temp <= 0 or temp > self.max_dryer_temperature:
-            raise gcmd.error('Wrong temperature')
         self._wait_homing_clear()
-
-        # Drying is independent of the active ACE.  Switching active ACE here
-        # can disarm the ACE that is currently feeding a toolhead.
+        # Do not use ACE_SWITCH here.  Web drying controls must not change
+        # the active feeder while a different ACE is providing print assist.
         if not self._connected_per_ace.get(ace_idx, False):
-            raise gcmd.error(self._t('msg.ace_not_connected', ace=self._disp(ace_idx)))
+            self.log_always(self._t('msg.ace_not_available',
+                ace=self._disp(ace_idx)))
+            return
 
         def callback(self, response):
-            if response is None:
-                self.log_error(self._t('msg.dryer_no_response_start',
-                    ace=self._disp(ace_idx)))
+            if response is None or response.get('code', 0) != 0:
+                msg = response.get('msg') if response else 'no response'
+                self.log_error(self._t('msg.ace_error_generic', error=msg))
                 return
-            if response.get('code', 0) != 0:
-                self.log_error(self._t('msg.ace_error_generic',
-                    error=response.get('msg')))
-                return
-            self.gcode.respond_info(self._t('msg.dryer_started'))
+            self._remember_v2_manual_dry(ace_idx, temp, duration)
+            self._v2_fan_running[ace_idx] = True
+            self._set_v2_exhaust(ace_idx, True, require_dryer=True)
+            self.log_always(self._t('msg.drying_ace_at',
+                ace=self._disp(ace_idx), temp=temp, duration=duration))
+            # Do not wait for the next status heartbeat.  A manual dryer
+            # started during a print must be stopped immediately if its ACE
+            # chamber is already at the configured print-temperature limit.
+            if self._is_printing_or_paused():
+                self._pause_hot_v2_dryers_for_print()
 
-        self.send_request_to(ace_idx, {
-            'method': 'drying',
-            'params': {'temp': temp, 'fan_speed': 7000, 'duration': duration},
-        }, callback)
-        self.log_always(self._t('msg.drying_ace_at',
-            ace=self._disp(ace_idx), temp=temp, duration=duration))
+        try:
+            self.send_request_to(ace_idx, {
+                'method': 'drying',
+                'params': {'temp': temp, 'fan_speed': 7000,
+                           'duration': duration},
+            }, callback)
+        except Exception as e:
+            logging.info('[multiACE] direct dryer start ACE %d failed: %s',
+                         ace_idx, e)
+            self.log_error(self._t('msg.ace_error_generic', error=str(e)))
 
-    cmd_ACE_AUTO_DRY_SET_help = (
-        '[multiACE] Update ACE2 Pro auto drying runtime settings. Usage: '
-        'ACE_AUTO_DRY_SET ACE=0 ENABLE=1 START=40 STOP=30 TEMP=50 '
-        '[CHECK=1]')
+    cmd_ACE_AUTO_DRY_SET_help = ('[multiACE] Update ACE2 Pro auto drying settings. '
+                                'Usage: ACE_AUTO_DRY_SET ACE=0 ENABLE=1 START=40 STOP=30 TEMP=50 [DURATION=480]')
     def cmd_ACE_AUTO_DRY_SET(self, gcmd):
         ace_idx = gcmd.get_int('ACE')
         if ace_idx < 0 or ace_idx >= max(len(self._ace_devices), 8):
             raise gcmd.error('[multiACE] ACE out of range: %d' % ace_idx)
-
-        enabled = bool(gcmd.get_int(
-            'ENABLE', 1 if self._v2_auto_dry_enabled.get(ace_idx, False) else 0,
-            minval=0, maxval=1))
-        start_h = gcmd.get_float(
-            'START',
-            self._v2_auto_dry_start_humidity.get(
-                ace_idx, self._v2_auto_dry_default_start_humidity),
-            minval=5.0, maxval=95.0)
-        stop_h = gcmd.get_float(
-            'STOP',
-            self._v2_auto_dry_stop_humidity.get(
-                ace_idx, self._v2_auto_dry_default_stop_humidity),
-            minval=1.0, maxval=90.0)
-        if stop_h >= start_h:
-            raise gcmd.error(
-                '[multiACE] STOP humidity must be lower than START humidity')
-        temp = gcmd.get_int(
-            'TEMP',
-            self._v2_auto_dry_temp.get(
-                ace_idx, self._v2_auto_dry_default_temp),
-            minval=30, maxval=70)
-        duration = gcmd.get_int(
-            'DURATION',
-            self._v2_auto_dry_duration.get(
-                ace_idx, self._v2_auto_dry_default_duration),
-            minval=10, maxval=480)
-        check_now = bool(gcmd.get_int('CHECK', 1, minval=0, maxval=1))
-
+        enabled = bool(gcmd.get_int('ENABLE', int(self._v2_auto_dry_enabled.get(ace_idx, False)), minval=0, maxval=1))
+        start = gcmd.get_float('START', self._v2_auto_dry_start_humidity[ace_idx], minval=5.0, maxval=95.0)
+        stop = gcmd.get_float('STOP', self._v2_auto_dry_stop_humidity[ace_idx], minval=1.0, maxval=90.0)
+        if stop >= start:
+            raise gcmd.error('[multiACE] STOP humidity must be lower than START humidity')
+        temp = gcmd.get_int('TEMP', self._v2_auto_dry_temp[ace_idx], minval=30, maxval=70)
+        duration = gcmd.get_int('DURATION', self._v2_auto_dry_duration[ace_idx], minval=10, maxval=480)
         self._v2_auto_dry_enabled[ace_idx] = enabled
-        self._v2_auto_dry_start_humidity[ace_idx] = start_h
-        self._v2_auto_dry_stop_humidity[ace_idx] = stop_h
+        self._v2_auto_dry_start_humidity[ace_idx] = start
+        self._v2_auto_dry_stop_humidity[ace_idx] = stop
         self._v2_auto_dry_temp[ace_idx] = temp
         self._v2_auto_dry_duration[ace_idx] = duration
-
         if not enabled:
             self._stop_v2_auto_dry(ace_idx, 'disabled')
-        elif check_now:
-            self._schedule_v2_auto_dry_check()
+            self._v2_dry_paused_by_print.pop(ace_idx, None)
+        else:
+            # Exhaust opening is scheduled only after DRYING succeeds and
+            # ACE2 reports the heater/fan running state.
+            if gcmd.get_int('CHECK', 1, minval=0, maxval=1):
+                self._schedule_v2_auto_dry_check()
         self._persist_v2_auto_dry_armed()
 
-        self.log_always(
-            '[multiACE] ACE%s auto dry: enabled=%s start=%.1f%% stop=%.1f%% '
-            'temp=%dC fan=100%%'
-            % (self._disp(ace_idx), enabled, start_h, stop_h, temp))
+    cmd_ACE_PRINT_BLOCK_TEMP_SET_help = '[multiACE] Set live ACE2 Pro print temperature limit. Usage: ACE_PRINT_BLOCK_TEMP_SET TEMP=60'
+    def cmd_ACE_PRINT_BLOCK_TEMP_SET(self, gcmd):
+        self._v2_print_block_temp = gcmd.get_float('TEMP', minval=30.0, maxval=80.0)
+        if self._print_stats_state() == 'printing':
+            self._pause_hot_v2_dryers_for_print()
+
+    cmd_ACE_UNLOAD_ALL_AFTER_PRINT_SET_help = (
+        '[multiACE] Set live post-print unload. Usage: '
+        'ACE_UNLOAD_ALL_AFTER_PRINT_SET ENABLE=0|1')
+    def cmd_ACE_UNLOAD_ALL_AFTER_PRINT_SET(self, gcmd):
+        self.unload_all_after_print = bool(
+            gcmd.get_int('ENABLE', minval=0, maxval=1))
+        self.log_always(self._t(
+            'msg.print_end_unload_enabled'
+            if self.unload_all_after_print
+            else 'msg.print_end_unload_disabled'))
 
     cmd_ACE_RUN_MODE_SWITCH_help = '[multiACE] Switch mode: normal (stock), single (one ACE), multi (multi-ACE)'
     def cmd_ACE_RUN_MODE_SWITCH(self, gcmd):
         mode = gcmd.get('MODE', '').lower()
         if mode not in ('normal', 'single', 'multi', 'head'):
             raise gcmd.error('[multiACE] Invalid mode: %s. Use normal, multi, or head.' % mode)
-
         if mode == 'single':
             mode = 'multi'
 
-        new_ace_head = (gcmd.get_int('HEAD', self._ace_head, minval=0, maxval=3)
-                        if mode == 'head' else self._ace_head)
+        # Use the active Klipper language for all mode-change messages. The
+        # reboot-required path is delivered through RAISE_EXCEPTION, so a
+        # hard-coded English string there would bypass the Web catalog.
+        mode_label = self._t('msg.mode_name_%s' % mode)
+
+        legacy_head = (gcmd.get_int('HEAD', None, minval=0, maxval=3)
+                       if mode == 'head' else None)
 
         current = self._ace_mode
 
@@ -8661,18 +10204,17 @@ class MultiAce:
                 "SAVE_VARIABLE VARIABLE=ace__mode VALUE=\"'%s'\"" % mode)
             self._ace_mode = mode
             if mode == 'head':
-                self._ace_head = new_ace_head
-                self.gcode.run_script_from_command(
-                    'SAVE_VARIABLE VARIABLE=%s VALUE=%d'
-                    % (self.VARS_ACE_HEAD, new_ace_head))
-
+                if legacy_head is not None:
+                    self._ace_head = legacy_head
+                    for h in range(4):
+                        self.head_feeder[h] = (h != legacy_head)
+                    self._save_head_feeder()
                 for h in range(4):
-                    if h != self._ace_head and not self.head_is_manual(h):
+                    if self.head_is_feeder(h) and not self.head_is_manual(h):
                         self._clear_filament_display(h)
             self._restore_head_source()
             self._ensure_extruder_change_handler()
-            self._sync_stock_entangle_detect()
-            self.log_always(self._t('msg.switched_to_mode', mode=mode.upper()))
+            self.log_always(self._t('msg.switched_to_mode', mode=mode_label))
             try:
                 self._push_rfid_info()
             except Exception:
@@ -8688,15 +10230,15 @@ class MultiAce:
 
         file_mode = 'normal' if mode == 'normal' else 'ace'
 
-        self.log_always(self._t('msg.running_mode_switch', mode=mode.upper()))
+        self.log_always(self._t('msg.running_mode_switch', mode=mode_label))
 
         self.gcode.run_script_from_command(
             "SAVE_VARIABLE VARIABLE=ace__mode VALUE=\"'%s'\"" % mode)
-        if mode == 'head':
-            self._ace_head = new_ace_head
-            self.gcode.run_script_from_command(
-                'SAVE_VARIABLE VARIABLE=%s VALUE=%d'
-                % (self.VARS_ACE_HEAD, new_ace_head))
+        if mode == 'head' and legacy_head is not None:
+            self._ace_head = legacy_head
+            for h in range(4):
+                self.head_feeder[h] = (h != legacy_head)
+            self._save_head_feeder()
 
         try:
             import subprocess
@@ -8712,11 +10254,12 @@ class MultiAce:
         except Exception as e:
             raise gcmd.error('[multiACE] Failed to run mode switch script: %s' % str(e))
 
+        reboot_msg = self._t('msg.switched_to_mode_reboot', mode=mode_label)
         self.gcode.run_script_from_command(
-            'RAISE_EXCEPTION ID=6666 INDEX=6 CODE=6 MESSAGE="[multiACE] Switched to %s mode. Please reboot!" ONESHOT=0 LEVEL=2' % mode.upper())
+            'RAISE_EXCEPTION ID=6666 INDEX=6 CODE=6 MESSAGE="%s" ONESHOT=0 LEVEL=2'
+            % reboot_msg.replace('"', ''))
 
-        raise gcmd.error(
-            '[multiACE] Switched to %s mode. Please reboot the printer to activate!' % mode.upper())
+        raise gcmd.error(reboot_msg)
 
     _UPDATE_SCRIPT = '/home/lava/multiace_update.sh'
 
@@ -9303,7 +10846,7 @@ class MultiAce:
                 for h in range(4):
                     ptc_info[h] = {
                         'type': ptc_status.get('filament_type', [''] * 4)[h],
-                        'color': ptc_status.get('filament_color_rgba', [''] * 4)[h],
+                        'color': ptc_status.get('filament_color', [''] * 4)[h],
                         'vendor': ptc_status.get('filament_vendor', [''] * 4)[h],
                     }
                 state['print_task_config'] = ptc_info
@@ -9359,62 +10902,24 @@ class MultiAce:
             logging.info('[multiACE] telemetry %s failed: %s' % (event, e))
 
     def get_status(self, eventtime=None):
-        try:
-            return self._get_status_safe(eventtime)
-        except Exception as e:
-            logging.exception('[multiACE] get_status fallback after error: %s' % e)
-            return {
-                'api_version': ACE_API_VERSION,
-                'status': 'unknown',
-                'temp': 0,
-                'dryer_status': {},
-                'gate_status': getattr(self, 'gate_status',
-                                       [GATE_UNKNOWN] * 4),
-                'active_device': getattr(self, '_active_device_index', 0),
-                'device_count': len(getattr(self, '_ace_devices', []) or []),
-                'ace_head': getattr(self, '_ace_head', 3),
-                'mode': getattr(self, '_ace_mode', 'normal'),
-                'swap_phase': getattr(self, '_swap_phase', 'idle'),
-                'last_swap_result': getattr(self, '_last_swap_result', None),
-                'event_seq': getattr(self, '_event_seq', 0),
-                'head_source': {},
-                'head_manual': {},
-                'swap_in_progress': bool(getattr(self, '_swap_in_progress', False)),
-                'aces': [],
-            }
 
-    def _get_status_safe(self, eventtime=None):
-        head_mode = (getattr(self, '_ace_mode', 'multi') == 'head')
-        head_ace = self.HEAD_MODE_ACE
-        active_info = self._info if isinstance(getattr(self, '_info', None), dict) else {}
-        if not active_info:
-            active_info = self._info_per_ace.get(
-                self._active_device_index, {}) or {}
-        default_info = self._make_default_info(self._active_device_index)
-
+        hot_aces = self._v2_overtemp_aces()
         aces = []
         for i in range(len(self._ace_devices)):
-            if head_mode and i != head_ace:
-                continue
             info = self._info_per_ace.get(i, {}) or {}
             slots_out = []
             for n, s in enumerate(info.get('slots', []) or []):
                 if not isinstance(s, dict):
                     continue
-                feed_info = self._json_safe_value(
-                    (self._v2_feed_info_per_ace.get(i) or {}).get(
-                        s.get('index', n), {}))
                 slots_out.append({
                     'index':    s.get('index', n),
                     'status':   s.get('status', ''),
-                    'slot_status': s.get('slot_status', ''),
                     'sku':      s.get('sku', ''),
                     'material': s.get('type', ''),
                     'subtype':  s.get('subtype', ''),
                     'rfid':     s.get('rfid', 0),
                     'brand':    s.get('brand', ''),
                     'color':    s.get('color', [0, 0, 0]),
-                    'feed_info': feed_info,
                 })
             protocol = self._protocols.get(i)
             aces.append({
@@ -9422,6 +10927,7 @@ class MultiAce:
                 'connected':    self._connected_per_ace.get(i, False),
                 'protocol':     getattr(protocol, 'NAME', '') if protocol else '',
                 'status':       info.get('status', 'unknown'),
+                'error':        self._v2_fault_per_ace.get(i),
                 'temp':         info.get('temp', 0),
 
                 'humidity':     info.get('humidity'),
@@ -9439,31 +10945,48 @@ class MultiAce:
                     'active': i in self._v2_auto_dry_active,
                     'check_interval': self._v2_auto_dry_check_interval,
                 },
+                'manual_dry': {
+                    'active': i in self._v2_manual_dry_active,
+                },
+                'exhaust_open': bool(self._v2_exhaust_open.get(i, False)),
                 'gate_status':  self._gate_status_per_ace.get(i, []),
                 'feed_assist':  self._feed_assist_per_ace.get(i, -1),
                 'slots':        slots_out,
             })
+        ace_heads_now = [h for h in range(4) if self.head_uses_ace(h)]
         return {
             'api_version': ACE_API_VERSION,
-            'status': active_info.get(
-                'status', default_info.get('status', 'unknown')),
-            'temp': active_info.get('temp', default_info.get('temp', 0)),
-            'dryer_status': active_info.get(
-                'dryer_status', default_info.get('dryer_status', {})),
-            'gate_status': (self._gate_status_per_ace.get(head_ace, self.gate_status)
-                            if head_mode else self.gate_status),
-            'active_device': head_ace if head_mode else self._active_device_index,
-            'device_count': 1 if head_mode else len(self._ace_devices),
-            'ace_head': getattr(self, '_ace_head', 3),
+            'status': self._info['status'],
+            'temp': self._info['temp'],
+            'dryer_status': self._info['dryer_status'],
+            'gate_status': self.gate_status,
+            'active_device': self._active_device_index,
+            'device_count': len(self._ace_devices),
+            'ace_head': (ace_heads_now[0] if len(ace_heads_now) == 1
+                         else getattr(self, '_ace_head', 3)),
+            'ace_heads': ace_heads_now,
             'mode': getattr(self, '_ace_mode', 'normal'),
+            'pickup_cleaning': getattr(self, '_pickup_cleaning', False),
             'swap_phase': self._swap_phase,
             'last_swap_result': self._last_swap_result,
             'event_seq': self._event_seq,
-
             'head_source': {str(k): v for k, v in self._head_source.items()},
             'head_manual': {str(h): bool(self.head_manual.get(h, False))
                             for h in range(4)},
+            'head_feeder': {str(h): bool(self.head_feeder.get(h, False))
+                            for h in range(4)},
+            'head_ace': {str(h): int(self.head_ace.get(h, h))
+                         for h in range(4)},
             'swap_in_progress': self._swap_in_progress,
+            'print_temp_gate': {
+                'waiting': bool(self._v2_print_start_temp_block
+                                and self._v2_print_temp_pause_owned
+                                and hot_aces),
+                'user_override': bool(self._v2_print_temp_user_override),
+                'limit': self._v2_print_block_temp,
+                'hot_aces': [{'idx': idx, 'temp': temp}
+                             for idx, temp in hot_aces],
+            },
             'aces': aces,
         }
 

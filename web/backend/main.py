@@ -57,7 +57,6 @@ OVERRIDE_FILE = os.environ.get(
     "MULTIACE_OVERRIDE_FILE",
     "/home/lava/printer_data/config/extended/multiace/slot_overrides.json",
 )
-
 FILAMENT_PARAMS_PATHS = tuple(
     os.environ.get(
         "MULTIACE_FILAMENT_PARAMS",
@@ -66,11 +65,9 @@ FILAMENT_PARAMS_PATHS = tuple(
         "/usr/share/klipper/klippy/extras/filament_parameters.py",
     ).split(":")
 )
-
 _FIL_DB_META_KEYS = {
     "version", "hard_filaments_max_flow_k", "soft_filaments_max_flow_k",
 }
-
 DEFAULT_MATERIALS = [
     "PLA", "PLA-CF",
     "PETG", "PETG-CF", "PETG-HF",
@@ -113,7 +110,6 @@ async def _query_state_gated() -> dict:
     if _homing_active():
         if _LAST_STATUS and (now - _LAST_STATUS_TS) <= _STATUS_CACHE_TTL:
             return _LAST_STATUS
-
         deadline = now + _GATE_WAIT_MAX
         while _homing_active() and time.time() < deadline:
             await asyncio.sleep(0.05)
@@ -140,11 +136,11 @@ def _resolve_version() -> str:
             continue
         m_ver = re.search(r'^MULTIACE_VERSION\s*=\s*["\']([^"\']+)["\']',
                           head, re.MULTILINE)
-        m_tag = re.search(r'^MULTIACE_BUILD_TAG\s*=\s*["\']([^"\']+)["\']',
-                          head, re.MULTILINE)
         if m_ver:
-            return ('%s+%s' % (m_ver.group(1), m_tag.group(1))
-                    if m_tag else m_ver.group(1))
+            # MULTIACE_VERSION is already the complete display version.
+            # BUILD_TAG is an internal integrity marker and must not be
+            # appended to the user-facing version string.
+            return m_ver.group(1)
     return "0.2.0"
 
 VERSION = _resolve_version()
@@ -157,6 +153,8 @@ ACE_OBJECTS = [
     "print_task_config",
     "print_stats",
     "idle_timeout",
+    "ace_bg_swap",
+    "ace_tipform",
 ]
 
 def _slot_state_name(v: Any) -> str:
@@ -208,11 +206,14 @@ def _parse_state(status: dict) -> dict:
     ace = status.get("ace", {}) or {}
     fl = status.get("filament_feed left",  {}) or {}
     fr = status.get("filament_feed right", {}) or {}
+    bg = status.get("ace_bg_swap", {}) or {}
+    tf = status.get("ace_tipform", {}) or {}
 
     device_count = int(ace.get("device_count", 1))
     active_device = int(ace.get("active_device", 0))
     head_source = ace.get("head_source", {}) or {}
     head_manual = ace.get("head_manual", {}) or {}
+    head_feeder = ace.get("head_feeder", {}) or {}
     raw_aces = ace.get("aces", []) or []
 
     ptc = status.get("print_task_config", {}) or {}
@@ -322,11 +323,9 @@ def _parse_state(status: dict) -> dict:
 
             override = _override_for(i, s)
             loaded_t = loaded_by_source.get((i, s))
-
             if override is not None:
                 ptc_overlay = {
                     "material": override.get("material", ""),
-
                     "sku":      "",
                     "brand":    override.get("brand", ""),
                     "color":    override.get("color") or None,
@@ -362,8 +361,6 @@ def _parse_state(status: dict) -> dict:
                     "state":     "empty",
                     "raw":       gate,
                     "status":    raw_status,
-                    "slot_status": sd.get("slot_status", ""),
-                    "feed_info": sd.get("feed_info") or {},
                     "rfid":      0,
                     "material":  "",
                     "brand":     "",
@@ -382,8 +379,6 @@ def _parse_state(status: dict) -> dict:
                         "state":     "ready" if not is_empty else "empty",
                         "raw":       gate,
                         "status":    raw_status,
-                        "slot_status": sd.get("slot_status", ""),
-                        "feed_info": sd.get("feed_info") or {},
                         "rfid":      rfid_status,
                         "material":  ptc_overlay["material"],
                         "brand":     ptc_overlay["brand"],
@@ -400,8 +395,6 @@ def _parse_state(status: dict) -> dict:
                         "state":     _slot_state_name(gate),
                         "raw":       gate,
                         "status":    raw_status,
-                        "slot_status": sd.get("slot_status", ""),
-                        "feed_info": sd.get("feed_info") or {},
                         "rfid":      rfid_status,
                         "material":  sd.get("material", "") or sd.get("type", ""),
                         "brand":     sd.get("brand", ""),
@@ -417,11 +410,14 @@ def _parse_state(status: dict) -> dict:
             "connected":    a.get("connected"),
             "protocol":     a.get("protocol", ""),
             "status":       a.get("status"),
+            "error":        a.get("error"),
             "temp":         a.get("temp"),
 
             "humidity":     a.get("humidity"),
             "dryer":        a.get("dryer_status") or {},
+            "manual_dry":   a.get("manual_dry") or {},
             "auto_dry":     a.get("auto_dry") or {},
+            "exhaust_open": bool(a.get("exhaust_open", False)),
             "feed_assist":  a.get("feed_assist", -1),
             "slots":        slots_out,
         })
@@ -435,13 +431,16 @@ def _parse_state(status: dict) -> dict:
         ext_key = f"extruder{t}" if t > 0 else "extruder0"
         feed = (fl if t < 2 else fr).get(ext_key, {}) or {}
 
-        d_explicit, sl_explicit = _resolve_head_source(
-            head_source.get(str(t)) or head_source.get(t))
+        _src_raw = head_source.get(str(t)) or head_source.get(t)
+        d_explicit, sl_explicit = _resolve_head_source(_src_raw)
+        load_failed = bool(isinstance(_src_raw, dict)
+                           and _src_raw.get("load_failed"))
         loaded = bool(feed.get("filament_detected"))
         color = None
         material = ""
         subtype = ""
         sku = ""
+        brand = ""
         source = None
         ace_field = None
         slot_field = None
@@ -454,27 +453,26 @@ def _parse_state(status: dict) -> dict:
                     slot_obj = slots_arr[sl_explicit]
                     color = slot_obj.get("color")
                     material = slot_obj.get("material", "")
-
                     subtype = slot_obj.get("subtype", "")
                     sku = slot_obj.get("sku", "")
                     source = slot_obj.get("source")
         is_manual = bool(head_manual.get(str(t), head_manual.get(t, False)))
-
         op_mode = ace.get("mode", "multi")
-        ace_head = int(ace.get("ace_head", 3) or 3)
-        is_feeder = (op_mode == "head" and t != ace_head and not is_manual)
+        is_feeder = (op_mode == "head"
+                     and bool(head_feeder.get(str(t), head_feeder.get(t, False)))
+                     and not is_manual)
         if is_manual or is_feeder:
-
             d_explicit = sl_explicit = None
             ace_field = slot_field = None
             color = None
-            material = subtype = sku = ""
+            material = subtype = sku = brand = ""
             source = None
             ptc_id = _ptc_at(t)
             if ptc_id:
                 material = ptc_id.get("material", "") or ""
                 color = ptc_id.get("color")
                 subtype = ptc_id.get("sku", "") or ""
+                brand = ptc_id.get("brand", "") or ""
         toolheads.append({
             "idx":                t,
             "name":               f"T{t}",
@@ -491,7 +489,9 @@ def _parse_state(status: dict) -> dict:
             "material":           material,
             "subtype":            subtype,
             "sku":                sku,
+            "brand":              brand,
             "head_source_known":  (d_explicit is not None) and not is_manual and not is_feeder,
+            "load_failed":        load_failed and not is_manual and not is_feeder,
             "manual":             is_manual,
             "feeder":             is_feeder,
             "source":             source,
@@ -526,15 +526,31 @@ def _parse_state(status: dict) -> dict:
         "active_device":      active_device,
         "device_count":       device_count,
         "mode":               mode,
+        "pickup_cleaning":    bool(ace.get("pickup_cleaning", False)),
         "ace_head":           int(ace.get("ace_head", 3) or 3),
+        "ace_heads":          ace.get("ace_heads", []) or [],
+        "head_feeder":        head_feeder,
+        "head_ace":           ace.get("head_ace", {}) or {},
         "language":           language,
         "display_index_base": idx_base,
         "dryer":              ace.get("dryer_status"),
         "swap_in_progress":   bool(ace.get("swap_in_progress", False)),
+        "print_temp_gate":    ace.get("print_temp_gate", {}) or {},
         "aces":               aces_out,
         "toolheads":          toolheads,
         "wiring":             wiring,
         "save_variables":     sv_vars,
+        "bg_swap": {
+            "available":     bool(bg.get("version")),
+            "version":       bg.get("version"),
+            "enabled_heads": bg.get("enabled_heads", []) or [],
+            "busy":          bg.get("busy", []) or [],
+        },
+        "tipform": {
+            "available": bool(tf.get("mode")),
+            "mode":      tf.get("mode"),
+            "tables":    tf.get("tables", []) or [],
+        },
     }
 
 async def _query_state() -> dict:
@@ -554,14 +570,29 @@ class MacroBatchRequest(BaseModel):
 class ConfigUpdate(BaseModel):
     content: str
     restart_klipper: bool = False
+    base_sha1: str | None = None
+
+class TipformUpdate(BaseModel):
+    mode: str
+    tables: dict[str, str]
+    restart_klipper: bool = False
 
 class SnapshotSave(BaseModel):
     name: str
     description: str | None = None
+    mode: str | None = None
 
 class HeadManual(BaseModel):
     head: int
     enable: bool
+
+class HeadFeeder(BaseModel):
+    head: int
+    enable: bool
+
+class HeadAce(BaseModel):
+    head: int
+    ace: int
 
 class SlotOverride(BaseModel):
     ace: int
@@ -615,17 +646,18 @@ _PREFLIGHT_DIR = Path("/tmp/multiace-preflight")
 _PREFLIGHT_TTL = 86400.0
 _PREFLIGHT_FUZZY = 30
 
-_PREFLIGHT_MAX_SIZE = int(os.environ.get(
-    "MULTIACE_PREFLIGHT_MAX_MB", "110")) * 1024 * 1024
-
 _pp_module = None
+_pp_src_sig = None
 
 def _load_post_processor():
     """Lazy-load the post-processor as a Python module so its parsing
-    and remap helpers can be reused server-side without a subprocess."""
-    global _pp_module
-    if _pp_module is not None:
-        return _pp_module
+    and remap helpers can be reused server-side without a subprocess.
+    mtime-aware: a multiACE update only restarts Klipper, NOT this uvicorn
+    process - a process-lifetime cache made every preflight after an update
+    silently run the OLD post-processor until the next reboot (HW-bitten
+    2026-07-05: a print ran without the ANTI_OOZE stamps). Reload whenever
+    the source file changed (path/mtime/size signature)."""
+    global _pp_module, _pp_src_sig
     candidates = [
         Path("/home/lava/printer_data/config/tools/post_process_virtual_toolheads.py"),
         Path(__file__).resolve().parent.parent.parent / "tools" / "post_process_virtual_toolheads.py",
@@ -634,6 +666,13 @@ def _load_post_processor():
     if src is None:
         raise HTTPException(status_code=503,
                             detail="post-processor script not installed")
+    try:
+        st = src.stat()
+        sig = (str(src), st.st_mtime_ns, st.st_size)
+    except OSError:
+        sig = (str(src), 0, 0)
+    if _pp_module is not None and sig == _pp_src_sig:
+        return _pp_module
     import importlib.util
     spec = importlib.util.spec_from_file_location("multiace_postprocess", src)
     mod = importlib.util.module_from_spec(spec)
@@ -643,6 +682,7 @@ def _load_post_processor():
         raise HTTPException(status_code=503,
                             detail=f"post-processor failed to load: {exc}")
     _pp_module = mod
+    _pp_src_sig = sig
     return mod
 
 def _cleanup_preflight_dir() -> None:
@@ -675,7 +715,6 @@ async def _live_slots_async() -> list[dict]:
         for slot in ace.get("slots", []) or []:
             if slot.get("state") == "empty":
                 continue
-
             if slot.get("source") not in ("rfid", "override"):
                 continue
             out.append({
@@ -709,13 +748,22 @@ def _remap_mapping(base_mapping: list[dict], remap_t_to_t: dict[int, int]) -> li
         out.append(new_m)
     return out
 
-async def _head_mode_context() -> tuple:
-    """(op_mode, ace_head, feeders) for the head-mode preflight. feeders are the
-    non-ACE heads that carry a loaded identity (the pin candidates)."""
+async def _head_mode_context() -> dict:
+    """Head-mode preflight context: mode, the ACE head list + each head's ACE,
+    and the loaded feeders (pin candidates). ace_head/ace_heads/head_ace let the
+    matcher build one swap bin per ACE head from its own ACE's slots."""
     status = await _query_state_gated()
     parsed = _parse_state(status)
     mode = parsed.get("mode") or "normal"
     ace_head = int(parsed.get("ace_head", 3) or 3)
+    ace_heads = [int(h) for h in (parsed.get("ace_heads") or [])]
+    raw_head_ace = parsed.get("head_ace", {}) or {}
+    head_ace = {}
+    for h in range(4):
+        try:
+            head_ace[h] = int(raw_head_ace.get(str(h), raw_head_ace.get(h, h)))
+        except (TypeError, ValueError):
+            head_ace[h] = h
     feeders = []
     for th in parsed.get("toolheads", []) or []:
         if not th.get("feeder"):
@@ -727,7 +775,12 @@ async def _head_mode_context() -> tuple:
         if not mat and not col:
             continue
         feeders.append({"head": int(th["idx"]), "material": mat, "color": col})
-    return mode, ace_head, feeders
+    bgs = parsed.get("bg_swap") or {}
+    return {"mode": mode, "ace_head": ace_head, "ace_heads": ace_heads,
+            "head_ace": head_ace, "feeders": feeders,
+            "pickup_cleaning": bool(parsed.get("pickup_cleaning")),
+            "bg_available": bool(bgs.get("available")),
+            "bg_heads": [int(h) for h in (bgs.get("enabled_heads") or [])]}
 
 @app.post("/api/preflight")
 async def preflight(file: UploadFile = File(...)) -> dict:
@@ -737,38 +790,32 @@ async def preflight(file: UploadFile = File(...)) -> dict:
         raise HTTPException(status_code=400, detail="invalid filename")
     if not safe_name.lower().endswith((".gcode", ".gco", ".g")):
         raise HTTPException(status_code=400, detail="not a g-code file")
-
     if await _any_head_manual():
         raise HTTPException(
             status_code=409,
             detail=("Preflight is disabled while a head is set to manual. "
                     "Switch the head back to auto, or upload the file directly "
                     "via Fluidd."))
-    data = await file.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="empty file")
-    if len(data) > _PREFLIGHT_MAX_SIZE:
-        raise HTTPException(
-            status_code=413,
-            detail=(f"This g-code is too large for in-printer preflight "
-                    f"({len(data)//1024//1024} MB > "
-                    f"{_PREFLIGHT_MAX_SIZE//1024//1024} MB limit). The "
-                    f"Snapmaker U1 is too slow to analyse files this large. "
-                    f"Run the multiACE post-processing script in your slicer "
-                    f"instead - it does the same analysis on your PC in "
-                    f"seconds - then upload the result directly via Moonraker. "
-                    f"Advanced: raise the limit via the "
-                    f"MULTIACE_PREFLIGHT_MAX_MB env var."))
-
     _cleanup_preflight_dir()
     _PREFLIGHT_DIR.mkdir(parents=True, exist_ok=True)
     import uuid as _uuid
     token = _uuid.uuid4().hex
-    upload_size = len(data)
     src_path = _PREFLIGHT_DIR / (token + ".gcode")
-    src_path.write_bytes(data)
+    upload_size = 0
+    with src_path.open("wb") as out:
+        while True:
+            chunk = await file.read(4 * 1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+            upload_size += len(chunk)
+    if upload_size <= 0:
+        try:
+            src_path.unlink()
+        except OSError:
+            pass
+        raise HTTPException(status_code=400, detail="empty file")
     (_PREFLIGHT_DIR / (token + ".name")).write_text(safe_name, encoding="utf-8")
-    del data
 
     pp = _load_post_processor()
 
@@ -780,8 +827,7 @@ async def preflight(file: UploadFile = File(...)) -> dict:
     if not live_slots:
         raise HTTPException(status_code=409,
                             detail="no slots are loaded on the printer")
-    hm_mode, hm_ace_head, hm_feeders = await _head_mode_context()
-    head_ctx = {"mode": hm_mode, "ace_head": hm_ace_head, "feeders": hm_feeders}
+    head_ctx = await _head_mode_context()
 
     try:
         return preflight_core.build_report(
@@ -812,17 +858,27 @@ def _stage_progress(state: dict, base: float, span: float):
         state["ts"] = time.time()
     return cb
 
-_PRINT_PREFS_LINE = ("SET_PRINT_PREFERENCES BED_LEVEL=0 "
-                     "FLOW_CALIBRATE=0 TIME_LAPSE_CAMERA=0")
+def _print_prefs_line(bed_mesh: bool, camera: bool) -> str:
+    """Build the SET_PRINT_PREFERENCES line for the chosen preflight toggles.
+    FORCE=1 is required: the line is the first line of the uploaded file, which
+    already runs with print_stats.state == 'printing', and stock rejects a
+    non-forced preference change there (error 531). FORCE=1 bypasses that gate
+    (print_task_config.cmd_SET_PRINT_PREFERENCES); it still runs before the
+    start/bed-leveling steps so the flags are set in time. Flow-calibrate/PA are
+    intentionally left off here (separate topic)."""
+    return ("SET_PRINT_PREFERENCES BED_LEVEL=%d FLOW_CALIBRATE=0 "
+            "TIME_LAPSE_CAMERA=%d FORCE=1"
+            % (1 if bed_mesh else 0, 1 if camera else 0))
 
-def _prepend_print_prefs(in_path: str, out_path: str) -> None:
+def _prepend_print_prefs(in_path: str, out_path: str,
+                         bed_mesh: bool = False, camera: bool = False) -> None:
     """Stream-copy in_path to out_path with the print-preference line
     prepended at the very top (before the start gcode's calibration).
     Any SET_PRINT_PREFERENCES the slicer already emits is commented out
     so it can't override ours from further down the file."""
     with open(out_path, "w", encoding="utf-8", errors="replace") as out:
         out.write("; multiACE preflight: print preferences\n")
-        out.write(_PRINT_PREFS_LINE + "\n")
+        out.write(_print_prefs_line(bed_mesh, camera) + "\n")
         with open(in_path, "r", encoding="utf-8", errors="replace") as src:
             for line in src:
                 if line.lstrip().upper().startswith("SET_PRINT_PREFERENCES"):
@@ -845,7 +901,8 @@ def _prune_old_jobs() -> None:
 
 async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
                                   safe_name: str,
-                                  set_prefs: bool = False,
+                                  bed_mesh: bool = False,
+                                  camera: bool = False,
                                   remap_override: dict | None = None,
                                   head_assignment: dict | None = None,
                                   head_plan: str = "loadout") -> None:
@@ -868,11 +925,16 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
 
         live_slots = await _live_slots_async()
         if mode == "head":
-            _, hm_ace_head, hm_feeders = await _head_mode_context()
-            head_ctx = {"mode": "head", "ace_head": hm_ace_head,
-                        "feeders": hm_feeders}
+            head_ctx = await _head_mode_context()
+            head_ctx["mode"] = "head"
         else:
             head_ctx = {"mode": "multi"}
+        if "pickup_cleaning" not in head_ctx:
+            try:
+                head_ctx["pickup_cleaning"] = bool(_parse_state(
+                    await _query_state_gated()).get("pickup_cleaning"))
+            except Exception:
+                head_ctx["pickup_cleaning"] = False
 
         final = await asyncio.to_thread(
             preflight_core.rewrite_pipeline, pp,
@@ -887,10 +949,10 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
         cur = Path(final)
         nxt = tmp_b if cur == tmp_a else tmp_a
 
-        if set_prefs:
+        if bed_mesh or camera:
             _set_stage(state, "print_prefs", 84.0)
             await asyncio.to_thread(
-                _prepend_print_prefs, str(cur), str(nxt))
+                _prepend_print_prefs, str(cur), str(nxt), bed_mesh, camera)
             cur, nxt = nxt, cur
 
         _set_stage(state, "upload", 85.0)
@@ -927,12 +989,10 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
 class _PreflightPrint(BaseModel):
     token: str
     mode:  str
-    set_prefs: bool = False
-
+    bed_mesh: bool = False
+    camera:   bool = False
     remap: dict[str, int] | None = None
-
     head_assignment: dict[str, str] | None = None
-
     head_plan: str = "loadout"
 
 @app.post("/api/preflight/print")
@@ -964,8 +1024,8 @@ async def preflight_print(req: _PreflightPrint) -> dict:
     head_plan = req.head_plan if req.head_plan in (
         "loadout", "optimize", "layer") else "loadout"
     asyncio.create_task(_run_preflight_pipeline(
-        job_id, req.token, req.mode, safe_name, req.set_prefs, req.remap,
-        req.head_assignment, head_plan))
+        job_id, req.token, req.mode, safe_name, req.bed_mesh, req.camera,
+        req.remap, req.head_assignment, head_plan))
     return {"job_id": job_id, "filename": safe_name, "mode": req.mode}
 
 @app.get("/api/preflight/print/status")
@@ -1021,10 +1081,10 @@ async def preflight_livedata() -> dict:
             status_code=409,
             detail="preflight is disabled while a head is set to manual")
     live_slots = await _live_slots_async()
-    mode, ace_head, feeders = await _head_mode_context()
+    head_ctx = await _head_mode_context()
     return {
         "live_slots": live_slots,
-        "head_ctx":   {"mode": mode, "ace_head": ace_head, "feeders": feeders},
+        "head_ctx":   head_ctx,
     }
 
 _cfg_scalar_cache: dict = {"mtime": 0.0, "values": {}}
@@ -1208,6 +1268,49 @@ async def reboot() -> dict:
         raise HTTPException(status_code=502,
                             detail=f"moonraker reboot failed: {e}")
 
+FLUIDD_CAMERA_NAME = "multiACE"
+FLUIDD_CAMERA = {
+    "name": FLUIDD_CAMERA_NAME,
+    "location": "printer",
+    "service": "iframe",
+    "stream_url": "/multiace/?panel=1",
+    "snapshot_url": "",
+    "aspect_ratio": "16:9",
+    "target_fps": 15,
+    "target_fps_idle": 5,
+    "enabled": True,
+    "icon": "mdiWebcam",
+}
+
+@app.post("/api/fluidd-camera")
+async def fluidd_camera() -> dict:
+    """Register the panel as a camera in Fluidd, via Moonraker.
+
+    Fluidd keeps cameras in Moonraker's database, so this is a plain
+    POST - no config file to edit and nothing to restart. Deliberately a
+    button rather than something the installer does: it changes the
+    user's own Fluidd dashboard, and nobody should find a camera there
+    they did not ask for.
+
+    Idempotent: an existing entry of the same name is reported and left
+    alone, so a second click cannot overwrite a URL or aspect ratio the
+    user has adjusted by hand.
+    """
+    try:
+        listing = await _mr_get("/server/webcams/list")
+        cams = (listing.get("result") or {}).get("webcams") or []
+        for cam in cams:
+            if str(cam.get("name", "")).strip().lower() \
+                    == FLUIDD_CAMERA_NAME.lower():
+                return {"ok": True, "existed": True,
+                        "stream_url": cam.get("stream_url", "")}
+        result = await _mr_post("/server/webcams/item", FLUIDD_CAMERA,
+                                timeout=10.0)
+        return {"ok": True, "existed": False, "moonraker": result}
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502,
+                            detail=f"moonraker: {e}")
+
 @app.post("/api/upload-and-print")
 async def upload_and_print(file: UploadFile = File(...)) -> dict:
 
@@ -1217,10 +1320,9 @@ async def upload_and_print(file: UploadFile = File(...)) -> dict:
         raise HTTPException(status_code=400, detail="invalid filename")
     if not safe_name.lower().endswith((".gcode", ".gco", ".g")):
         raise HTTPException(status_code=400, detail="not a g-code file")
-    data = await file.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="empty file")
-    files = {"file": (safe_name, data, file.content_type or "application/octet-stream")}
+    await file.seek(0)
+    files = {"file": (safe_name, file.file,
+                       file.content_type or "application/octet-stream")}
     payload = {"root": "gcodes", "print": "true"}
     try:
         async with httpx.AsyncClient(timeout=300.0) as client:
@@ -1240,7 +1342,6 @@ async def get_state() -> dict:
     try:
         status = await _query_state_gated()
     except httpx.HTTPStatusError as e:
-
         if e.response is not None and e.response.status_code == 503:
             return {"klippy": "disconnected"}
         return {"error": f"moonraker: {e}"}
@@ -1338,7 +1439,6 @@ async def run_macro(req: MacroRequest) -> dict:
             parts.append(f"{k}={v}")
     script = " ".join(parts)
     try:
-
         result = await _mr_post("/printer/gcode/script",
                                 {"script": script}, timeout=1800.0)
     except httpx.HTTPStatusError as e:
@@ -1391,6 +1491,163 @@ def _extract_params(text: str) -> tuple[dict[str, str], dict[int, dict[str, str]
             per_ace.setdefault(section, {})[key] = val
     return main, per_ace
 
+_TIPFORM_SECTION_RE = re.compile(r"^\[\s*ace_tipform\s*\]\s*$")
+_TIPFORM_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_\-]*)\s*:\s*(.*)$")
+_TIPFORM_NAME_RE = re.compile(r"^[a-z0-9_\-]{1,32}$")
+_tipform_mod_cache: dict = {"sig": None, "mod": None}
+
+def _load_tipform_module():
+    """Import the INSTALLED ace_tipform.py so the web validates tables with
+    the exact parser Klipper will run them through (a bad table written
+    unvalidated would HALT Klipper at the next restart). mtime-aware like
+    the post-processor loader (S23: updates replace the file, uvicorn
+    lives on). None = module not on this build -> editor disabled."""
+    import importlib.util
+    candidates = [
+        Path("/home/lava/klipper/klippy/extras/ace_tipform.py"),
+        Path(__file__).resolve().parents[2] / "klipper" / "extras"
+        / "ace_tipform.py",
+    ]
+    for cand in candidates:
+        try:
+            if not cand.is_file():
+                continue
+            st = cand.stat()
+            sig = (str(cand), st.st_mtime, st.st_size)
+            if _tipform_mod_cache["sig"] == sig \
+                    and _tipform_mod_cache["mod"] is not None:
+                return _tipform_mod_cache["mod"]
+            spec = importlib.util.spec_from_file_location(
+                "ace_tipform_webvalidate", str(cand))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _tipform_mod_cache["sig"] = sig
+            _tipform_mod_cache["mod"] = mod
+            return mod
+        except Exception as e:
+            print("[/api/tipform] validator load failed from %s: %s"
+                  % (cand, e), file=sys.stderr, flush=True)
+    return None
+
+def _extract_tipform(text: str) -> tuple[str, dict[str, str]]:
+    """(mode, {table_name: raw_table_string}) from the cfg's [ace_tipform]
+    section. Missing section -> ('stock', {})."""
+    mode, tables = "stock", {}
+    in_section = False
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_section = bool(_TIPFORM_SECTION_RE.match(stripped))
+            continue
+        if not in_section or not stripped or stripped.startswith("#"):
+            continue
+        if raw[:1] in (" ", "\t"):
+            continue
+        m = _TIPFORM_KEY_RE.match(stripped)
+        if not m:
+            continue
+        key, val = m.group(1).strip().lower(), m.group(2).strip()
+        if key == "mode":
+            mode = val.lower()
+        else:
+            tables[key] = val
+    return mode, tables
+
+def _rewrite_tipform_section(text: str, mode: str,
+                             tables: dict[str, str]) -> str:
+    """Replace (or append) the [ace_tipform] section body. Everything
+    outside the section - including the shipped comment block ABOVE the
+    header - is preserved byte-identically."""
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    i, n = 0, len(lines)
+    placed = False
+    while i < n:
+        raw = lines[i]
+        if _TIPFORM_SECTION_RE.match(raw.strip()):
+            out.append(raw if raw.endswith("\n") else raw + "\n")
+            out.append("mode: %s\n" % mode)
+            for key in sorted(tables.keys()):
+                out.append("%s: %s\n" % (key, tables[key]))
+            i += 1
+            while i < n and not lines[i].lstrip().startswith("["):
+                i += 1
+            placed = True
+            continue
+        out.append(raw)
+        i += 1
+    if not placed:
+        if out and out[-1].strip():
+            out.append("\n")
+        out.append("[ace_tipform]\n")
+        out.append("mode: %s\n" % mode)
+        for key in sorted(tables.keys()):
+            out.append("%s: %s\n" % (key, tables[key]))
+    return "".join(out)
+
+@app.get("/api/tipform")
+async def get_tipform() -> dict:
+    """The tip-forming editor state: cfg truth (mode + raw table strings)
+    plus whether this build supports the feature at all."""
+    mod = _load_tipform_module()
+    p = Path(MULTIACE_CFG_PATH)
+    mode, tables = ("stock", {})
+    if p.exists():
+        mode, tables = _extract_tipform(p.read_text(encoding="utf-8"))
+    return {
+        "supported": mod is not None,
+        "mode": mode,
+        "tables": tables,
+    }
+
+@app.post("/api/tipform")
+async def set_tipform(payload: TipformUpdate) -> dict:
+    """Validate + write the [ace_tipform] section. Validation runs the
+    installed module's parse_table - the same code Klipper runs at
+    startup - so a table the web accepts can never halt the printer."""
+    mod = _load_tipform_module()
+    if mod is None:
+        raise HTTPException(409, "this build has no ace_tipform module - "
+                            "update multiACE first")
+    mode = (payload.mode or "stock").strip().lower()
+    if mode not in ("stock", "custom"):
+        raise HTTPException(400, "mode must be 'stock' or 'custom'")
+    tables: dict[str, str] = {}
+    for name, raw in (payload.tables or {}).items():
+        key = (name or "").strip().lower()
+        raw = (raw or "").strip()
+        if not raw:
+            continue
+        if key == "mode" or not _TIPFORM_NAME_RE.match(key):
+            raise HTTPException(
+                400, "invalid table name %r (a-z, 0-9, _ and -, max 32)"
+                % name)
+        try:
+            mod.parse_table(raw)
+        except ValueError as e:
+            raise HTTPException(400, "table %r: %s" % (key, e))
+        tables[key] = raw
+    p = Path(MULTIACE_CFG_PATH)
+    if not p.exists():
+        raise HTTPException(404, f"config file not found: {MULTIACE_CFG_PATH}")
+    text = p.read_text(encoding="utf-8")
+    backup = p.with_suffix(p.suffix + ".bak")
+    backup.write_text(text, encoding="utf-8")
+    p.write_text(_rewrite_tipform_section(text, mode, tables),
+                 encoding="utf-8")
+    restart: dict | None = None
+    if payload.restart_klipper:
+        try:
+            restart = await _mr_post("/printer/firmware_restart", {})
+        except httpx.HTTPError as e:
+            restart = {"error": str(e)}
+    return {"mode": mode, "tables": tables, "backup": str(backup),
+            "restart": restart}
+
+def _cfg_sha1(text: str) -> str:
+    import hashlib
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
 @app.get("/api/config")
 async def get_config() -> dict:
     p = Path(MULTIACE_CFG_PATH)
@@ -1398,23 +1655,35 @@ async def get_config() -> dict:
         raise HTTPException(404, f"config file not found: {MULTIACE_CFG_PATH}")
     text = p.read_text(encoding="utf-8")
     main, per_ace = _extract_params(text)
-    return {"path": str(p), "content": text, "params": main, "per_ace_params": per_ace}
+    return {"path": str(p), "content": text, "params": main,
+            "per_ace_params": per_ace, "sha1": _cfg_sha1(text)}
 
 @app.put("/api/config")
 async def update_config(payload: ConfigUpdate) -> dict:
     p = Path(MULTIACE_CFG_PATH)
     if not p.exists():
         raise HTTPException(404, f"config file not found: {MULTIACE_CFG_PATH}")
+    if payload.base_sha1:
+        cur = p.read_text(encoding="utf-8")
+        cur_sha1 = _cfg_sha1(cur)
+        if cur_sha1 != payload.base_sha1:
+            raise HTTPException(409, json.dumps({
+                "error": "config changed on disk since it was loaded",
+                "sha1": cur_sha1,
+                "content": cur,
+            }))
     backup = p.with_suffix(p.suffix + ".bak")
     backup.write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
     p.write_text(payload.content, encoding="utf-8")
+    new_sha1 = _cfg_sha1(payload.content)
     restart: dict | None = None
     if payload.restart_klipper:
         try:
-            restart = await _mr_post("/printer/restart", {})
+            restart = await _mr_post("/printer/firmware_restart", {})
         except httpx.HTTPError as e:
             restart = {"error": str(e)}
-    return {"path": str(p), "backup": str(backup), "restart": restart}
+    return {"path": str(p), "backup": str(backup), "restart": restart,
+            "sha1": new_sha1}
 
 _LANG_NAME_RE = re.compile(r"^[A-Za-z]{2}(-[A-Za-z]{2})?$")
 
@@ -1490,49 +1759,73 @@ async def screen_available() -> dict:
 
 _SNAP_NAME_RE = re.compile(r"^[A-Za-z0-9_\- ]{1,64}$")
 
-def _snap_path(name: str) -> Path:
+def _snap_dir(mode: str | None) -> Path:
+    base = Path(SNAPSHOT_DIR)
+    return base / "head" if (mode or "") == "head" else base
+
+def _snap_path(name: str, mode: str | None = None) -> Path:
     if not _SNAP_NAME_RE.match(name):
         raise HTTPException(400, "name must match [A-Za-z0-9_- ]{1,64}")
-    return Path(SNAPSHOT_DIR) / f"{name}.json"
+    return _snap_dir(mode) / f"{name}.json"
 
-def _capture_snapshot(now_status: dict) -> dict:
+def _capture_snapshot(now_status: dict, mode: str | None = None) -> dict:
     """Build a snapshot from the current parsed state - what's loaded and
     where. Used for both saving (after parse_state) and as preview data.
 
-    Skips toolheads that have filament physically present but no
-    explicit head_source - those land in the snapshot with ace=None /
-    slot=None, which would later make apply emit a 'slot is empty'
-    error. Without a known source ACE/slot we can't reproduce the
-    load anyway, so dropping is the right move."""
+    Multi/normal: only ACE-loaded toolheads (known head_source ace/slot) are
+    captured; a head with filament but no source can't be reproduced, so it is
+    dropped (apply would otherwise emit a 'slot is empty' error).
+
+    Head mode: ACE heads are captured the same way (ace/slot), AND feeder heads
+    are captured by their filament IDENTITY (material/colour/brand/subtype from
+    print_task_config) with kind='feeder' and ace/slot=None - apply restores the
+    identity via SET_PRINT_FILAMENT_CONFIG (the user reloads the feeder by hand).
+    """
     parsed = _parse_state(now_status)
+    head_mode = (mode or "") == "head"
     toolheads = []
     for t in parsed["toolheads"]:
-        if not t.get("filament_detected"):
-            continue
         ace = t.get("ace")
         slot = t.get("slot")
-        if ace is None or slot is None:
-            continue
-        slot_obj = None
-        if ace is not None and 0 <= ace < len(parsed["aces"]):
-            slots = parsed["aces"][ace]["slots"]
-            if slot is not None and 0 <= slot < len(slots):
-                slot_obj = slots[slot]
-        toolheads.append({
-            "idx":      t["idx"],
-            "ace":      ace,
-            "slot":     slot,
-            "material": (slot_obj or {}).get("material", ""),
-            "brand":    (slot_obj or {}).get("brand", ""),
-            "color":    (slot_obj or {}).get("color"),
-            "color_rgb": (slot_obj or {}).get("color_rgb"),
-            "sku":      (slot_obj or {}).get("sku", ""),
-        })
+        if ace is not None and slot is not None:
+            slot_obj = None
+            if 0 <= ace < len(parsed["aces"]):
+                slots = parsed["aces"][ace]["slots"]
+                if 0 <= slot < len(slots):
+                    slot_obj = slots[slot]
+            if not t.get("filament_detected"):
+                continue
+            toolheads.append({
+                "idx":      t["idx"],
+                "kind":     "ace",
+                "ace":      ace,
+                "slot":     slot,
+                "material": (slot_obj or {}).get("material", ""),
+                "brand":    (slot_obj or {}).get("brand", ""),
+                "color":    (slot_obj or {}).get("color"),
+                "color_rgb": (slot_obj or {}).get("color_rgb"),
+                "sku":      (slot_obj or {}).get("sku", ""),
+            })
+        elif head_mode and t.get("feeder"):
+            mat = (t.get("material") or "").strip()
+            col = (t.get("color") or "")
+            if not mat and not col:
+                continue
+            toolheads.append({
+                "idx":      t["idx"],
+                "kind":     "feeder",
+                "ace":      None,
+                "slot":     None,
+                "material": mat,
+                "brand":    (t.get("brand") or "").strip(),
+                "color":    col,
+                "sku":      (t.get("subtype") or "").strip(),
+            })
     return {"toolheads": toolheads}
 
 @app.get("/api/snapshots")
-async def list_snapshots() -> dict:
-    d = Path(SNAPSHOT_DIR)
+async def list_snapshots(mode: str | None = None) -> dict:
+    d = _snap_dir(mode)
     d.mkdir(parents=True, exist_ok=True)
     items = []
     for p in sorted(d.glob("*.json")):
@@ -1550,13 +1843,13 @@ async def list_snapshots() -> dict:
 
 @app.post("/api/snapshots")
 async def save_snapshot(req: SnapshotSave) -> dict:
-    p = _snap_path(req.name)
+    p = _snap_path(req.name, req.mode)
     p.parent.mkdir(parents=True, exist_ok=True)
     try:
         status = await _query_state_gated()
     except httpx.HTTPError as e:
         raise HTTPException(502, f"moonraker: {e}")
-    snap = _capture_snapshot(status)
+    snap = _capture_snapshot(status, req.mode)
     snap["name"] = req.name
     snap["description"] = req.description
     snap["saved"] = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -1564,22 +1857,22 @@ async def save_snapshot(req: SnapshotSave) -> dict:
     return {"ok": True, "path": str(p), "snapshot": snap}
 
 @app.get("/api/snapshots/{name}")
-async def get_snapshot(name: str) -> dict:
-    p = _snap_path(name)
+async def get_snapshot(name: str, mode: str | None = None) -> dict:
+    p = _snap_path(name, mode)
     if not p.exists():
         raise HTTPException(404, "snapshot not found")
     return json.loads(p.read_text(encoding="utf-8"))
 
 @app.delete("/api/snapshots/{name}")
-async def delete_snapshot(name: str) -> dict:
-    p = _snap_path(name)
+async def delete_snapshot(name: str, mode: str | None = None) -> dict:
+    p = _snap_path(name, mode)
     if not p.exists():
         raise HTTPException(404, "snapshot not found")
     p.unlink()
     return {"ok": True}
 
 @app.post("/api/snapshots/{name}/apply")
-async def apply_snapshot(name: str) -> dict:
+async def apply_snapshot(name: str, mode: str | None = None) -> dict:
     """
     Plan a snapshot apply. Computes the ordered command list to bring
     the printer from the current state to the snapshot, but does NOT
@@ -1587,7 +1880,7 @@ async def apply_snapshot(name: str) -> dict:
     command queue, so the user sees the full plan as queue chips and
     long-running commands don't time out our HTTP call.
     """
-    p = _snap_path(name)
+    p = _snap_path(name, mode)
     if not p.exists():
         raise HTTPException(404, "snapshot not found")
     snap = json.loads(p.read_text(encoding="utf-8"))
@@ -1614,6 +1907,8 @@ async def apply_snapshot(name: str) -> dict:
     warnings: list[dict] = []
 
     for idx, dt in desired.items():
+        if dt.get("kind") == "feeder" or dt.get("ace") is None:
+            continue
         ace_i  = dt.get("ace")
         slot_i = dt.get("slot")
         sv = _slot_view(ace_i, slot_i)
@@ -1680,6 +1975,23 @@ async def apply_snapshot(name: str) -> dict:
     for ace_idx in sorted(by_ace):
         for head in sorted(by_ace[ace_idx]):
             actions.append({"name": "ACE_LOAD_HEAD", "args": {"HEAD": head, "ACE": ace_idx}})
+
+    for idx, dt in sorted(desired.items()):
+        if dt.get("kind") != "feeder":
+            continue
+        mat = (dt.get("material") or "").strip()
+        col = (dt.get("color") or "").strip()
+        if not mat and not col:
+            continue
+        hexc = col.lstrip("#") or "ffffff"
+        dq = lambda s: '"%s"' % str(s or "").replace('"', "")
+        actions.append({"name": "SET_PRINT_FILAMENT_CONFIG", "args": {
+            "CONFIG_EXTRUDER":     idx,
+            "FILAMENT_TYPE":       dq(mat or "PLA"),
+            "FILAMENT_COLOR_RGBA": hexc.upper() + "FF",
+            "VENDOR":              dq((dt.get("brand") or "Generic")),
+            "FILAMENT_SUBTYPE":    dq((dt.get("sku") or "")),
+        }})
 
     override_proposals: list[dict] = []
     for idx, dt in desired.items():
@@ -1952,7 +2264,6 @@ async def _moonraker_log_listener() -> None:
 
                     if debug_recv:
                         _trace.warning("moonraker WS recv #%d: %s", msg_count, str(raw)[:240])
-
                     if _homing_active():
                         continue
                     try:
@@ -2177,6 +2488,42 @@ async def head_manual_set(req: HeadManual) -> dict:
         raise HTTPException(status_code=502, detail=f"moonraker: {e}")
     return {"ok": True, "head": req.head, "manual": req.enable}
 
+@app.post("/api/head-feeder")
+async def head_feeder_set(req: HeadFeeder) -> dict:
+    """Toggle stock-feeder mode for a head (head mode only): the head
+    loads/unloads via its stock side feeder and the ACE never touches it.
+    Persisted by the Klipper module."""
+    if req.head < 0 or req.head > 3:
+        raise HTTPException(status_code=400, detail="head must be 0..3")
+    script = "ACE_SET_HEAD_FEEDER HEAD=%d ENABLE=%d" % (
+        req.head, 1 if req.enable else 0)
+    try:
+        await _mr_post("/printer/gcode/script", {"script": script})
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code,
+                            detail=f"moonraker: {e.response.text}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"moonraker: {e}")
+    return {"ok": True, "head": req.head, "feeder": req.enable}
+
+@app.post("/api/head-ace")
+async def head_ace_set(req: HeadAce) -> dict:
+    """Set which ACE feeds an ACE head (head mode): the head can only
+    load/swap that ACE's slots. Persisted by the Klipper module."""
+    if req.head < 0 or req.head > 3:
+        raise HTTPException(status_code=400, detail="head must be 0..3")
+    if req.ace < 0 or req.ace > 3:
+        raise HTTPException(status_code=400, detail="ace must be 0..3")
+    script = "ACE_SET_HEAD_ACE HEAD=%d ACE=%d" % (req.head, req.ace)
+    try:
+        await _mr_post("/printer/gcode/script", {"script": script})
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code,
+                            detail=f"moonraker: {e.response.text}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"moonraker: {e}")
+    return {"ok": True, "head": req.head, "ace": req.ace}
+
 _FIL_DB_CACHE: dict = {}
 
 def _load_filament_db() -> dict:
@@ -2283,7 +2630,6 @@ async def ws(websocket: WebSocket) -> None:
                         return
                     last_seen_notif_id = n["id"]
             if now - last_ts >= 1.0 and not _homing_active():
-
                 try:
                     status = await _query_state()
                     payload = _parse_state(status)
@@ -2291,7 +2637,6 @@ async def ws(websocket: WebSocket) -> None:
                     payload["ts"] = now
                     await websocket.send_json(payload)
                 except httpx.HTTPStatusError as e:
-
                     if e.response is not None and e.response.status_code == 503:
                         await websocket.send_json(
                             {"type": "state", "klippy": "disconnected", "ts": now})
@@ -2305,6 +2650,15 @@ async def ws(websocket: WebSocket) -> None:
         return
     except Exception:
         return
+
+_SHELL_PATHS = {"/", "/index.html", "/app.js", "/style.css"}
+
+@app.middleware("http")
+async def _shell_revalidate(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path in _SHELL_PATHS:
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 if Path(FRONTEND_DIR).is_dir():
     app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

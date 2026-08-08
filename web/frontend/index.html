@@ -11,11 +11,151 @@
 </head>
 <body>
 <div id="app">
-  <header>
+  <!-- PANEL MODE (?panel=1): a compact view meant to be embedded, e.g. as a
+       Fluidd "HTTP Page" camera - Fluidd has no plugin API, so an iframe is
+       the way in. Deliberately a MODE of this app, not a second interface:
+       it reuses the same state, macros, queue, confirmations and i18n, so
+       there is nothing to keep in sync. The iframe does not scale, so the
+       layout targets a narrow fixed box (Fluidd defaults to 300px wide). -->
+  <div v-if="panelMode" class="panel">
+    <div v-if="loadError" class="panel-err">{{ loadError }}</div>
+    <!-- Thumbnail line. In an all-cameras strip a tile is about 190px wide,
+         where four slot cards are neither readable nor tappable - so below
+         that the stylesheet hides them and shows this instead: the running
+         lane in its colour, plus the reminder that the full view is one click
+         away. Always in the DOM, CSS alone decides when it is visible, so
+         there is no resize listener and no second render path to keep in
+         sync. Fluidd already prints the camera's name on the tile, so this
+         does not repeat it. -->
+    <div class="panel-mini">
+      <span class="panel-mini-dot"
+            :class="{'panel-mini-dot-empty': !panelMini.color}"
+            :style="panelMini.color ? {background: panelMini.color} : {}"></span>
+      <div class="panel-mini-text">
+        <span class="panel-mini-main">{{ panelMini.main }}<span
+              class="panel-mini-sub" v-if="panelMini.sub"> · {{ panelMini.sub }}</span></span>
+        <span class="panel-mini-hint">{{ t('ui.common.panel_expand') }}</span>
+      </div>
+    </div>
+    <!-- Selecting a card follows the full dashboard: it activates that ACE
+         and refreshes its material identity in Klipper/AFC and on the screen. -->
+    <div class="panel-tabs" v-if="visibleAces.length > 1">
+      <button v-for="a in visibleAces" :key="'pt-'+a.idx"
+              :class="{active: a.idx === panelAceIdx}"
+              :disabled="panelSyncBusy"
+              @click="setPanelAce(a.idx)">{{ dispIdx(a.idx) }}</button>
+    </div>
+    <template v-if="panelAce">
+      <div class="panel-head">
+        <span>ACE {{ dispIdx(panelAce.idx) }}</span>
+        <span class="panel-temp">
+          <span v-if="panelAce.temp != null">{{ panelAce.temp }} °C</span>
+          <span v-if="typeof panelAce.humidity === 'number'">
+            · {{ Math.round(panelAce.humidity) }} %rH</span>
+        </span>
+        <!-- Always a NEW tab: a plain link would navigate the camera tile
+             itself, leaving the full interface squeezed into a 190px box
+             with no way back. -->
+        <a class="panel-full" :href="fullUiHref" target="_blank" rel="noopener"
+           :title="t('ui.common.panel_full')">⧉</a>
+      </div>
+      <!-- One card per slot, side by side (AFC-style). The grid wraps by
+           itself, so the same markup is 4-across in a 16:9 camera card and
+           2x2 in a narrow one - see .panel-cards. -->
+      <div class="panel-cards">
+        <div v-for="slot in panelAce.slots" :key="'ps-'+slot.idx"
+             class="panel-card"
+             :class="{empty: slot.state === 'empty',
+                      active: panelSlotActive(panelAce, slot.idx),
+                      'op-loading': panelSlotOp(panelAce.idx, slot.idx) === 'loading',
+                      'op-unloading': panelSlotOp(panelAce.idx, slot.idx) === 'unloading'}"
+             :title="slotTitle(panelAce, slot)">
+          <div class="panel-card-top">
+            <span class="panel-card-slot">{{ dispIdx(slot.idx) }}</span>
+            <span class="panel-card-head"
+                  v-if="panelSlotHeadLoaded(panelAce.idx, slot.idx) !== null">T{{
+                dispIdx(panelSlotHeadLoaded(panelAce.idx, slot.idx)) }}</span>
+          </div>
+          <!-- Same gesture as the dashboard, where the slot tile itself
+               opens the picker - here the body (spool + identity) is that
+               tile. The action row below stays click-through so Load and
+               Unload are not swallowed by it. -->
+          <div class="panel-card-body panel-card-pick"
+               @click="openPicker(panelAce, slot)"
+               :title="t('ui.dialog.picker_title')">
+            <!-- Spool seen from the side: two flanges, the filament colour
+                 as the core. Reads at a glance far better than a colour
+                 chip, which is the one thing the AFC card does really well. -->
+            <svg class="panel-spool" viewBox="0 0 24 34" aria-hidden="true">
+              <rect x="0.5" y="1" width="6" height="32" rx="2.5"
+                    class="panel-spool-side"/>
+              <rect x="17.5" y="1" width="6" height="32" rx="2.5"
+                    class="panel-spool-side"/>
+              <rect x="5.5" y="6" width="13" height="22" rx="1.5"
+                    class="panel-spool-core"
+                    :class="{'panel-spool-empty': !slot.color}"
+                    :style="slot.color ? {fill: slot.color} : {}"/>
+            </svg>
+            <div class="panel-card-info">
+              <span class="panel-card-mat" v-if="slot.material">{{ slot.material }}</span>
+              <span class="panel-card-mat muted" v-else>{{ t('ui.common.empty') }}</span>
+              <span class="panel-card-sub" v-if="subText(slot.subtype)">{{ subText(slot.subtype) }}</span>
+            </div>
+          </div>
+          <div class="panel-card-label">{{ panelSlotLabel(panelAce.idx, slot.idx) }}</div>
+          <div class="panel-card-actions">
+            <button class="panel-btn"
+                    @click="loadSlot(panelAce.idx, slot.idx)"
+                    :disabled="isPrinting || slotIsEmpty(panelAce.idx, slot.idx) || (state.mode === 'head' ? (slotLoadedInHead(panelAce.idx, slot.idx) && !needsReload(panelAce.idx, slot.idx)) : (!needsReload(panelAce.idx, slot.idx) && isToolheadOccupied(panelAce.idx, slot.idx)))"
+                    :title="isPrinting ? t('ui.dashboard.blocked_printing') : (slotIsEmpty(panelAce.idx, slot.idx) ? t('ui.dashboard.slot_empty_hint', {ace: dispIdx(panelAce.idx), slot: dispIdx(slot.idx)}) : '')">{{
+                needsReload(panelAce.idx, slot.idx) ? t('ui.dashboard.reload') : t('ui.dashboard.load') }}</button>
+            <!-- Unload is per HEAD, not per slot. Shown on the slot anyway
+                 (that is how the user thinks about it) and mapped to the head
+                 this slot actually feeds. -->
+            <button class="panel-btn warn"
+                    @click="unloadHead(panelSlotHead(panelAce.idx, slot.idx))"
+                    :disabled="isPrinting || panelSlotHead(panelAce.idx, slot.idx) === null"
+                    :title="isPrinting ? t('ui.dashboard.blocked_printing') : ''">{{
+                t('ui.dashboard.unload') }}</button>
+          </div>
+        </div>
+      </div>
+      <div class="panel-all">
+        <button v-if="state.mode !== 'head'" @click="loadAll(panelAce.idx)"
+                :disabled="isPrinting">{{ t('ui.dashboard.load_all') }}</button>
+        <button class="warn" @click="unloadAll()"
+                :disabled="isPrinting">{{ t('ui.dashboard.unload_all') }}</button>
+      </div>
+      <!-- Spool loadouts: the same select + apply/save/delete as the
+           dashboard, minus the preview block - no room for it, and the
+           select already names what is about to be applied. -->
+      <div class="panel-snap">
+        <select v-model="selectedSnapshot">
+          <option value="">- {{ t('ui.dashboard.snapshot_select_or_new') }} -</option>
+          <option v-for="s in snapshots" :key="s.name" :value="s.name">{{ s.name }}</option>
+        </select>
+        <button @click="loadSnapshot" :disabled="!selectedSnapshot || isPrinting"
+                :title="t('ui.common.apply')">{{ t('ui.common.apply') }}</button>
+        <button @click="saveSnapshot" class="primary"
+                :title="t('ui.dashboard.save_current')">✓</button>
+        <button @click="deleteSnapshot" :disabled="!selectedSnapshot"
+                class="warn">×</button>
+      </div>
+    </template>
+    <div v-else class="panel-err">{{ t('ui.common.offline') }}</div>
+    <!-- Without this a failed load would be invisible in the panel. -->
+    <div class="panel-status" v-if="visibleQueue.length || notifications.length">
+      <span v-if="visibleQueue.length">⏳ {{ visibleQueue.length }}</span>
+      <span v-if="notifications.length" class="panel-notif"
+            :title="notifications[notifications.length-1].msg">{{
+          notifications[notifications.length-1].msg }}</span>
+    </div>
+  </div>
+  <header v-if="!panelMode">
     <h1>m<span class="hl">U</span>lt<span class="hl">1</span>ACE
       <small>{{ version }}</small>
       <small v-if="printerName" class="printer-tag"
-             :title="'Firmware ' + printerFw">· {{ printerName }}</small>
+             :title="t('ui.common.firmware') + ' ' + printerFw">· {{ printerName }}</small>
     </h1>
     <nav>
       <button v-if="state.mode !== 'normal'"
@@ -38,8 +178,8 @@
     </select>
     <span class="conn" :class="connClass">{{ connText }}</span>
   </header>
-  <div v-if="rebootNeeded" class="reboot-banner">{{ t('ui.common.please_restart') }}</div>
-  <main>
+  <div v-if="rebootNeeded && !panelMode" class="reboot-banner">{{ t('ui.common.please_restart') }}</div>
+  <main v-if="!panelMode">
     <section v-show="tab==='dashboard' && state.mode !== 'normal'">
       <p v-if="loadError" class="error">{{ loadError }}</p>
       <div class="status-row">
@@ -47,12 +187,19 @@
           {{ t('ui.dashboard.status_pill') }}: <strong>{{ state.printer_state || '–' }}</strong>
         </span>
         <span class="pill">{{ t('ui.dashboard.active_pill') }}: <strong>ACE {{ dispIdx(state.active_device) }}</strong></span>
-        <span class="pill">{{ t('ui.dashboard.mode_pill') }}: <strong>{{ state.mode || '–' }}</strong></span>
+        <span class="pill">{{ t('ui.dashboard.mode_pill') }}: <strong>{{ modeLabel(state.mode) }}</strong></span>
         <button v-if="screenAvailable" class="pill pill-btn"
                 :class="{active: screenPopout}"
                 @click="toggleScreenPopout"
                 :title="t('ui.dashboard.show_display_hint')">
           {{ screenPopout ? t('ui.dashboard.hide_display') : t('ui.dashboard.show_display') }}
+        </button>
+      </div>
+      <div v-if="printTempNotice" class="temperature-wait-banner"
+           role="status" aria-live="polite">
+        <span>{{ printTempNotice }}</span>
+        <button v-if="printTempWaiting" @click="openPrintTempSetting">
+          {{ t('ui.dashboard.adjust_print_temp') }}
         </button>
       </div>
       <div ref="wiringContainerEl" class="ace-th-wrap">
@@ -69,13 +216,13 @@
                 stroke-linecap="round"></path>
         </svg>
         <h3>{{ t('ui.dashboard.aces') }}</h3>
-        <p v-if="state.aces.length === 0 && !loadError" class="muted">
+        <p v-if="visibleAces.length === 0 && !loadError" class="muted">
           {{ t('ui.dashboard.no_aces') }}
         </p>
-        <div class="ace-grid">
-          <article v-for="ace in state.aces" :key="ace.idx" class="ace-card"
-                   :class="{primary: ace.idx === state.active_device, clickable: ace.idx !== state.active_device, 'ace-right': state.mode === 'head' && state.ace_head >= 2}"
-                   @click="ace.idx !== state.active_device && switchAce(ace.idx)">
+        <div class="ace-grid" :class="{'ace-grid-right': state.mode === 'head' && aceHeadsRightSide}">
+          <article v-for="ace in visibleAces" :key="ace.idx" class="ace-card"
+                   :class="{primary: ace.idx === state.active_device, clickable: true}"
+                   @click="switchAce(ace.idx)">
             <h2>
               <span class="ace-name">ACE {{ dispIdx(ace.idx) }}
                 <span class="ace-proto" v-if="ace.protocol">({{ ace.protocol.toUpperCase() }})</span>
@@ -86,7 +233,8 @@
                 <span v-if="typeof ace.humidity === 'number'" class="ace-humidity">
                   · {{ Math.round(ace.humidity) }} %rH
                 </span>
-                <span v-if="ace.status" class="ace-state-text"> · {{ ace.status }}</span>
+                <span v-if="ace.status" class="ace-state-text"
+                      :title="ace.error || ''"> · {{ ace.status }}</span>
               </span>
               <span class="ace-card-actions" @click.stop>
                 <button class="ace-dry-btn"
@@ -121,16 +269,10 @@
                 <button class="slot-load-btn"
                         :class="{reload: needsReload(ace.idx, slot.idx)}"
                         @click.stop="loadSlot(ace.idx, slot.idx)"
-                        :disabled="isPrinting || (state.mode === 'head' ? slotLoadedInHead(slot.idx) : (!needsReload(ace.idx, slot.idx) && isToolheadOccupied(ace.idx, slot.idx)))"
-                        :title="isPrinting ? t('ui.dashboard.blocked_printing') : (needsReload(ace.idx, slot.idx) ? t('ui.dashboard.reload_hint') : t('ui.dashboard.load'))">
+                        :disabled="isPrinting || slotIsEmpty(ace.idx, slot.idx) || (state.mode === 'head' ? (slotLoadedInHead(ace.idx, slot.idx) && !needsReload(ace.idx, slot.idx)) : (!needsReload(ace.idx, slot.idx) && isToolheadOccupied(ace.idx, slot.idx)))"
+                        :title="isPrinting ? t('ui.dashboard.blocked_printing') : (slotIsEmpty(ace.idx, slot.idx) ? t('ui.dashboard.slot_empty_hint', {ace: dispIdx(ace.idx), slot: dispIdx(slot.idx)}) : (needsReload(ace.idx, slot.idx) ? t('ui.dashboard.reload_hint') : t('ui.dashboard.load')))">
                   {{ needsReload(ace.idx, slot.idx) ? t('ui.dashboard.reload') : t('ui.dashboard.load') }}
                 </button>
-                <div v-if="ace.protocol === 'v2' && slot.feed_info" class="slot-mileage"
-                     :title="slot.slot_status || slot.status || ''">
-                  <span>D {{ slot.feed_info.decoder ?? '–' }}</span>
-                  <span>L {{ slot.feed_info.length ?? '–' }}</span>
-                  <span>S {{ slot.feed_info.steps ?? '–' }}</span>
-                </div>
               </div>
             </div>
             <transition name="dry-fade" mode="out-in">
@@ -144,12 +286,33 @@
                   </label>
                   <label>{{ t('ui.dashboard.duration') }}
                     <input type="number" v-model.number="dryerCfg[ace.idx].duration"
-                           min="1" max="600" step="5"> min
+                           min="1" max="600" step="5"> {{ t('ui.common.minute') }}
                   </label>
-                  <button @click="dryStart(ace.idx)" :disabled="isDryerBlocked"
-                          :title="isDryerBlocked ? t('ui.dashboard.dryer_blocked_printing') : ''">{{ t('ui.common.start') }}</button>
-                  <button @click="dryStop(ace.idx)" class="warn" :disabled="isDryerBlocked"
-                          :title="isDryerBlocked ? t('ui.dashboard.dryer_blocked_printing') : ''">{{ t('ui.common.stop') }}</button>
+                  <button class="auto-dry-start-btn"
+                          :class="{armed: manualDrying(ace)}"
+                          @click="dryStart(ace.idx)" :disabled="isDryerBlocked"
+                          :title="isDryerBlocked ? t('ui.dashboard.dryer_blocked_printing') : ''">
+                    {{ manualDrying(ace) ? t('ui.common.working') : t('ui.common.start') }}
+                  </button>
+                  <button class="auto-dry-stop-btn warn"
+                          :class="{stopped: !manualDrying(ace)}"
+                          @click="dryStop(ace.idx)" :disabled="isDryerBlocked"
+                          :title="isDryerBlocked ? t('ui.dashboard.dryer_blocked_printing') : ''">
+                    {{ t('ui.common.stop') }}
+                  </button>
+                  <span v-if="ace.protocol === 'v2'" class="exhaust-label">{{ t('ui.dashboard.exhaust') }}</span>
+                  <button v-if="ace.protocol === 'v2'" class="auto-dry-start-btn"
+                          :class="{armed: exhaustOpen(ace)}"
+                          @click="setExhaust(ace.idx, true)"
+                          :disabled="isDryerBlocked">
+                    {{ exhaustOpen(ace) ? t('ui.dashboard.exhaust_opened') : t('ui.dashboard.exhaust_open') }}
+                  </button>
+                  <button v-if="ace.protocol === 'v2'" class="auto-dry-stop-btn warn"
+                          :class="{stopped: !exhaustOpen(ace)}"
+                          @click="setExhaust(ace.idx, false)"
+                          :disabled="isDryerBlocked">
+                    {{ t('ui.dashboard.exhaust_close') }}
+                  </button>
                 </div>
                 <div v-if="ace.protocol === 'v2'" class="auto-dry-row">
                   <label>{{ t('ui.dashboard.auto_temp') }}
@@ -185,7 +348,7 @@
                   <strong>{{ ace.dryer.status }}</strong>
                   <span v-if="ace.dryer.target_temp"> · {{ ace.dryer.target_temp }} °C</span>
                   <span v-if="ace.dryer.remain_time && !(ace.auto_dry && ace.auto_dry.active)">
-                    · {{ Math.round(ace.dryer.remain_time / 60) }} min
+                    · {{ Math.round(ace.dryer.remain_time / 60) }} {{ t('ui.common.minute') }}
                   </span>
                 </div>
               </div>
@@ -201,19 +364,26 @@
           <article v-for="t_ in state.toolheads" :key="t_.idx"
                    :ref="el => setThEl(t_.idx, el)"
                    class="toolhead-card"
-                   :class="{empty: !t_.module_exist, present: t_.head_source_known, unknown: !t_.head_source_known && t_.filament_at_extruder && !t_.manual && !t_.feeder, manual: t_.manual, feeder: t_.feeder, 'feeder-empty': t_.feeder && !t_.filament_detected, 'op-loading': toolheadOps[t_.idx] === 'loading', 'op-unloading': toolheadOps[t_.idx] === 'unloading'}">
+                   :class="{empty: !t_.module_exist, present: headSourceActive(t_) && !t_.load_failed, 'load-failed': t_.load_failed, unknown: !headSourceActive(t_) && t_.filament_at_extruder && !t_.manual && !t_.feeder, manual: t_.manual, feeder: t_.feeder, 'feeder-empty': t_.feeder && !t_.filament_detected, 'op-loading': toolheadOps[t_.idx] === 'loading', 'op-unloading': toolheadOps[t_.idx] === 'unloading'}">
             <h2>T{{ dispIdx(t_.idx) }}
               <small v-if="!t_.module_exist">{{ t('ui.common.offline') }}</small>
-              <span class="th-color" v-if="t_.color && (t_.head_source_known || t_.manual || t_.feeder) && !toolheadOps[t_.idx]" :style="{background: t_.color}"></span>
+              <span class="th-color"
+                    v-if="(t_.color || t_.feeder) && (headSourceActive(t_) || t_.manual || t_.feeder) && !toolheadOps[t_.idx]"
+                    :class="{clickable: t_.feeder, empty: t_.feeder && !t_.color}"
+                    :style="t_.color ? {background: t_.color} : {}"
+                    @click="t_.feeder && openHeadPicker(t_)"
+                    :title="t_.feeder ? t('ui.dashboard.feeder_set_filament') : ''"></span>
             </h2>
             <p class="meta" v-if="toolheadOps[t_.idx]">
               <span class="muted">{{ toolheadOps[t_.idx] === 'loading' ? t('ui.dashboard.load') : t('ui.dashboard.unload') }}…</span>
             </p>
-            <p class="meta" v-else-if="t_.head_source_known">
-              <span v-if="t_.ace != null && t_.slot != null">ACE {{ dispIdx(t_.ace) }} / Slot {{ dispIdx(t_.slot) }}</span>
-              <span v-if="t_.material"> · {{ t_.material }}</span>
-              <br v-if="t_.material && subText(t_.subtype)">
-              <span v-if="t_.material && subText(t_.subtype)" class="muted">{{ subText(t_.subtype) }}</span>
+            <p class="meta" v-else-if="headSourceActive(t_)">
+              <span v-if="t_.ace != null && t_.slot != null">ACE {{ dispIdx(t_.ace) }} / {{ t('ui.dashboard.slot_format', {slot: dispIdx(t_.slot)}) }}</span>
+              <span v-if="t_.material && !t_.load_failed"> · {{ t_.material }}</span>
+              <span v-if="t_.load_failed" class="error-inline"
+                    :title="t('ui.dashboard.load_failed_hint')"> · {{ t('ui.dashboard.load_failed') }}</span>
+              <br v-if="t_.material && subText(t_.subtype) && !t_.load_failed">
+              <span v-if="t_.material && subText(t_.subtype) && !t_.load_failed" class="muted">{{ subText(t_.subtype) }}</span>
             </p>
             <p class="meta" v-else-if="t_.manual">
               <span class="muted">{{ t('ui.dashboard.manual') }}</span>
@@ -242,25 +412,69 @@
             <div class="toolhead-actions" v-if="t_.module_exist">
               <button v-if="t_.feeder && !t_.filament_at_extruder" @click="loadFeederHead(t_.idx)"
                       :disabled="isPrinting" :title="isPrinting ? t('ui.dashboard.blocked_printing') : ''">{{ t('ui.dashboard.load') }}</button>
+              <button v-if="canBreakSource(t_)" class="warn" @click="breakHeadSource(t_.idx)"
+                      :disabled="isPrinting" :title="t('ui.dashboard.break_source_hint')">{{ t('ui.dashboard.break_source') }}</button>
+              <button v-if="needsSourceRepair(t_)" @click="repairHeadSource(t_.idx)"
+                      :disabled="isPrinting" :title="t('ui.dashboard.repair_source_hint')">{{ t('ui.dashboard.repair_source') }}</button>
               <button class="warn" @click="unloadHead(t_.idx)"
-                      :disabled="(!t_.head_source_known && !t_.filament_at_extruder) || isPrinting"
+                      :disabled="(!headSourceActive(t_) && !t_.filament_at_extruder) || isPrinting"
                       :title="isPrinting ? t('ui.dashboard.blocked_printing') : ''">{{ t('ui.dashboard.unload') }}</button>
             </div>
-            <label class="th-manual" v-if="t_.module_exist"
-                   :class="{disabled: t_.head_source_known || t_.filament_at_extruder}"
-                   :title="(t_.head_source_known || t_.filament_at_extruder)
+            <div class="th-source-repair" v-if="needsSourceRepair(t_)">
+              <span>{{ t('ui.dashboard.repair_source_manual') }}</span>
+              <select :value="repairAceOf(t_.idx)" @change="setRepairAce(t_.idx, $event.target.value)">
+                <option v-for="a in state.aces" :key="a.idx" :value="a.idx">ACE {{ dispIdx(a.idx) }}</option>
+              </select>
+              <select :value="repairSlotOf(t_.idx)" @change="setRepairSlot(t_.idx, $event.target.value)">
+                <option v-for="s in repairSlotsFor(t_.idx)" :key="s.idx" :value="s.idx">{{ t('ui.dashboard.slot') }} {{ dispIdx(s.idx) }} · {{ s.material || t('ui.common.unknown') }}</option>
+              </select>
+              <button @click="repairHeadSourceManual(t_.idx)" :disabled="isPrinting">{{ t('ui.dashboard.repair_apply') }}</button>
+            </div>
+            <label class="th-manual" v-if="t_.module_exist && state.mode !== 'head'"
+                   :class="{disabled: headSourceActive(t_) || t_.filament_at_extruder}"
+                   :title="(headSourceActive(t_) || t_.filament_at_extruder)
                      ? t('ui.dashboard.manual_unload_first')
                      : t('ui.dashboard.manual_hint')">
               <input type="checkbox" :checked="t_.manual"
-                     :disabled="t_.head_source_known || t_.filament_at_extruder"
+                     :disabled="headSourceActive(t_) || t_.filament_at_extruder"
                      @change="setHeadManual(t_.idx, $event.target.checked)">
               <span>{{ t('ui.dashboard.manual') }}</span>
             </label>
+            <label class="th-manual" v-if="t_.module_exist && state.mode === 'head'"
+                   :class="{disabled: headSourceActive(t_) || t_.filament_at_extruder}"
+                   :title="(headSourceActive(t_) || t_.filament_at_extruder)
+                     ? t('ui.dashboard.feeder_unload_first')
+                     : t('ui.dashboard.feeder_hint')">
+              <input type="checkbox" :checked="t_.feeder"
+                     :disabled="headSourceActive(t_) || t_.filament_at_extruder"
+                     @change="setHeadFeeder(t_.idx, $event.target.checked)">
+              <span>{{ t('ui.dashboard.feeder') }}</span>
+            </label>
+            <div class="th-ace-row" v-if="t_.module_exist && state.mode === 'head' && !t_.feeder && !t_.manual">
+              <label class="th-ace-pick"
+                     :class="{disabled: headSourceActive(t_) || t_.filament_at_extruder}"
+                     :title="(headSourceActive(t_) || t_.filament_at_extruder)
+                       ? t('ui.dashboard.head_ace_unload_first')
+                       : t('ui.dashboard.head_ace_hint')">
+                <span>{{ t('ui.dashboard.head_ace') }}</span>
+                <select :value="headAceOf(t_.idx)"
+                        :disabled="headSourceActive(t_) || t_.filament_at_extruder"
+                        @change="setHeadAce(t_.idx, $event.target.value)">
+                  <option v-for="o in aceOptionsForHead(t_.idx)" :key="o.value" :value="o.value">{{ o.label }}</option>
+                </select>
+              </label>
+              <label class="th-manual th-bg" v-if="state.bg_swap.available"
+                     :title="t('ui.dashboard.bg_hint')">
+                <input type="checkbox" :checked="bgEnabledFor(t_.idx)"
+                       @change="setBgHead(t_.idx, $event.target.checked)">
+                <span>{{ t('ui.dashboard.bg') }}</span>
+              </label>
+            </div>
           </article>
         </div>
       </div>
-      <h3 v-if="state.mode !== 'head'">{{ t('ui.dashboard.snapshots') }}</h3>
-      <div class="snapshot-row" v-if="state.mode !== 'head'">
+      <h3>{{ t('ui.dashboard.snapshots') }}</h3>
+      <div class="snapshot-row">
         <select v-model="selectedSnapshot">
           <option value="">- {{ t('ui.dashboard.snapshot_select_or_new') }} -</option>
           <option v-for="s in snapshots" :key="s.name" :value="s.name">
@@ -271,12 +485,17 @@
         <button @click="saveSnapshot" class="primary">{{ t('ui.dashboard.save_current') }}</button>
         <button @click="deleteSnapshot" :disabled="!selectedSnapshot" class="warn">×</button>
       </div>
-      <div v-if="snapshotPreview && state.mode !== 'head'" class="snapshot-preview">
+      <div v-if="snapshotPreview" class="snapshot-preview">
         <strong>{{ snapshotPreview.name }}</strong>
         <div class="snapshot-thds">
           <span v-for="t_ in snapshotPreview.toolheads" :key="t_.idx" class="snapshot-th"
                 :style="t_.color ? {background: t_.color} : {}">
-            T{{ dispIdx(t_.idx) }}: ACE {{ dispIdx(t_.ace) }}/{{ dispIdx(t_.slot) }}
+            <template v-if="t_.kind === 'feeder' || t_.ace == null">
+              T{{ dispIdx(t_.idx) }}: {{ t('ui.dashboard.feeder') }}
+            </template>
+            <template v-else>
+              T{{ dispIdx(t_.idx) }}: ACE {{ dispIdx(t_.ace) }}/{{ dispIdx(t_.slot) }}
+            </template>
             <em v-if="t_.material">{{ t_.material }}</em>
           </span>
         </div>
@@ -292,14 +511,24 @@
         <button v-for="m in ['normal','multi','head']"
                 :key="m"
                 :class="{active: state.mode === m}"
-                @click="setMode(m)">{{ m }}</button>
-        <label class="ace-head-pick">
-          {{ t('ui.config.ace_head') }}
-          <select v-model.number="aceHeadSel">
-            <option v-for="h in [0,1,2,3]" :key="h" :value="h">{{ dispIdx(h) }}</option>
-          </select>
-        </label>
+                @click="setMode(m)">{{ modeLabel(m) }}</button>
       </div>
+      <p v-if="state.mode === 'head'" class="muted small">{{ t('ui.config.head_mode_hint') }}</p>
+      <h3>{{ t('ui.config.pickup_cleaning') }}</h3>
+      <label class="pickup-clean-toggle">
+        <input type="checkbox" :checked="state.pickup_cleaning"
+               @change="setPickupCleaning($event.target.checked)">
+        {{ t('ui.config.pickup_cleaning_label') }}
+      </label>
+      <p class="muted small">{{ t('ui.config.pickup_cleaning_hint') }}</p>
+      <h3>{{ t('ui.config.fluidd_panel') }}</h3>
+      <div class="row">
+        <button @click="addFluiddCamera" :disabled="fluiddCamBusy">
+          {{ fluiddCamBusy ? t('ui.common.saving') : t('ui.config.fluidd_panel_add') }}
+        </button>
+        <span v-if="fluiddCamMsg" class="muted small">{{ fluiddCamMsg }}</span>
+      </div>
+      <p class="muted small">{{ t('ui.config.fluidd_panel_hint') }}</p>
       <h3>{{ t('ui.config.parameters') }}</h3>
       <div class="config-form">
         <div class="config-row">
@@ -325,12 +554,17 @@
           <input type="number" v-model.number="configForm.retract_length" min="0" max="5000">
         </div>
         <div class="config-row">
+          <label>{{ t('ui.config.seat_overshoot') }}</label>
+          <input type="number" v-model.number="configForm.seat_overshoot_length"
+                 min="0" max="100" step="1" placeholder="20">
+        </div>
+        <div class="config-row">
           <label>{{ t('ui.config.swap_retract_length') }}</label>
           <input type="number" v-model.number="configForm.swap_retract_length"
                  min="0" max="2000" step="1" placeholder="900">
         </div>
         <div class="config-row">
-          <label>Swap purge length</label>
+          <label>{{ t('ui.config.swap_purge_length') }}</label>
           <input type="number" v-model.number="configForm.swap_purge_length"
                  min="0" max="200" step="1" placeholder="0">
         </div>
@@ -343,8 +577,15 @@
           <input type="number" v-model.number="configForm.dryer_duration" min="0" max="600" step="5" placeholder="-">
         </div>
         <div class="config-row">
+          <label>{{ t('ui.config.dry_exhaust_open_delay') }}</label>
+          <input type="number" v-model.number="configForm.v2_dry_exhaust_open_delay"
+                 min="0" max="9999" step="1">
+        </div>
+        <div class="config-row">
           <label>{{ t('ui.config.print_block_temp') }}</label>
-          <input type="number" v-model.number="configForm.v2_print_block_temp" min="30" max="80" step="1" placeholder="40">
+          <input id="print-block-temp-input" type="number"
+                 v-model.number="configForm.v2_print_block_temp"
+                 min="30" max="80" step="1" placeholder="40">
         </div>
         <div class="config-row">
           <label>{{ t('ui.config.display_index_base') }}</label>
@@ -354,12 +595,20 @@
           </select>
         </div>
         <div class="config-row">
-          <label>ACE 2 order</label>
+          <label>{{ t('ui.config.v2_order') }}</label>
           <select v-model="configForm.v2_order">
-            <option value="first">before ACE 1</option>
-            <option value="last">after ACE 1</option>
+            <option value="first">{{ t('ui.config.v2_order_first') }}</option>
+            <option value="last">{{ t('ui.config.v2_order_last') }}</option>
           </select>
         </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.identity_priority') }}</label>
+          <select v-model="configForm.identity_priority">
+            <option value="multiace">{{ t('ui.config.identity_priority_multiace') }}</option>
+            <option value="spoollink">{{ t('ui.config.identity_priority_spoollink') }}</option>
+          </select>
+        </div>
+        <p class="muted small">{{ t('ui.config.identity_priority_hint') }}</p>
         <div class="config-row">
           <label>{{ t('ui.config.load_retry') }}</label>
           <input type="number" v-model.number="configForm.load_retry" min="0" max="20" step="1" placeholder="-">
@@ -381,9 +630,9 @@
         </div>
         <fieldset>
           <legend>{{ t('ui.config.debug_logs') }}</legend>
-          <label><input type="checkbox" v-model="configForm.state_debug"> state_debug</label>
-          <label><input type="checkbox" v-model="configForm.usb_debug"> usb_debug</label>
-          <label><input type="checkbox" v-model="configForm.fa_debug"> fa_debug</label>
+          <label><input type="checkbox" v-model="configForm.state_debug"> {{ t('ui.config.state_debug') }}</label>
+          <label><input type="checkbox" v-model="configForm.usb_debug"> {{ t('ui.config.usb_debug') }}</label>
+          <label><input type="checkbox" v-model="configForm.fa_debug"> {{ t('ui.config.fa_debug') }}</label>
         </fieldset>
       </div>
       <h3>{{ t('ui.config.per_ace') }}</h3>
@@ -399,7 +648,7 @@
           <div class="per-ace-row">
             <label>{{ t('ui.config.dryer_duration_override') }}
               <input type="number" v-model.number="configForm.perAce[i-1].dryer_duration"
-                     min="0" max="600" step="5" placeholder="-"> min
+                     min="0" max="600" step="5" placeholder="-"> {{ t('ui.common.minute') }}
             </label>
           </div>
           <div class="per-ace-row">
@@ -437,7 +686,7 @@
             <table class="per-slot-table">
               <thead>
                 <tr>
-                  <th>Slot</th>
+                  <th>{{ t('ui.config.slot_column') }}</th>
                   <th>{{ t('ui.config.load_length') }}</th>
                   <th>{{ t('ui.config.retract_length') }}</th>
                   <th>{{ t('ui.config.swap_retract_length') }}</th>
@@ -471,6 +720,63 @@
           <button @click="saveConfigRaw" class="primary">{{ t('ui.config.raw_save') }}</button>
         </div>
       </details>
+      <h3>{{ t('ui.config.tipform_title') }}</h3>
+      <div v-if="tipform.supported" class="tipform-card">
+        <p class="muted small">{{ t('ui.config.tipform_intro') }}</p>
+        <div class="config-row">
+          <label>{{ t('ui.config.tipform_mode') }}</label>
+          <select v-model="tipform.mode">
+            <option value="stock">{{ t('ui.config.tipform_mode_stock') }}</option>
+            <option value="custom">{{ t('ui.config.tipform_mode_custom') }}</option>
+          </select>
+        </div>
+        <div v-for="(row, idx) in tipform.rows" :key="idx" class="tipform-row-wrap">
+          <div class="tipform-row">
+            <select class="tipform-name" v-model="row.material">
+              <option value="" disabled>{{ t('ui.config.tipform_name_ph') }}</option>
+              <option v-for="n in tipformNameOptions(row)" :key="n" :value="n">{{ n }}</option>
+            </select>
+            <input class="tipform-vendor" v-model="row.vendor"
+                   :placeholder="t('ui.config.tipform_vendor_ph')"
+                   spellcheck="false">
+            <input class="tipform-table" v-model="row.table"
+                   placeholder="57@400, 3@1500, -27@2700, -5.5@40, -37.5@1500"
+                   spellcheck="false">
+            <button class="tipform-stock" @click="tipformInsertStock(row)"
+                    :title="t('ui.config.tipform_stock_hint')">{{ t('ui.config.tipform_stock') }}</button>
+            <button class="tipform-build" :class="{active: row._builderOpen}"
+                    @click="tipformToggleBuilder(row)"
+                    :title="t('ui.config.tipform_builder_hint')">🔧</button>
+            <button class="tipform-del" @click="tipformRemoveRow(idx)"
+                    :title="t('ui.common.remove')">✕</button>
+          </div>
+          <div v-if="row._builderOpen" class="tipform-builder">
+            <div v-for="(step, si) in row._steps" :key="si" class="tipform-step">
+              <select v-model="step.type" @change="tipformStepsToTable(row)">
+                <option v-for="ty in TIPFORM_STEP_TYPES" :key="ty" :value="ty">{{ ty }}</option>
+              </select>
+              <input v-model="step.a" @input="tipformStepsToTable(row)"
+                     :placeholder="tipformStepPlaceholder(step)" spellcheck="false">
+              <input v-if="step.type === 'move'" v-model="step.b"
+                     @input="tipformStepsToTable(row)" placeholder="毫米/分钟" spellcheck="false">
+              <button class="tipform-del" @click="tipformRemoveStep(row, si)"
+                      :title="t('ui.common.remove')">✕</button>
+            </div>
+            <button class="tipform-addstep" @click="tipformAddStep(row)">
+              + {{ t('ui.config.tipform_add_step') }}</button>
+          </div>
+        </div>
+        <div class="row">
+          <button @click="tipformAddRow">{{ t('ui.config.tipform_add') }}</button>
+          <button @click="saveTipform(false)" class="primary">{{ t('ui.common.save') }}</button>
+          <button @click="saveTipform(true)" class="primary">{{ t('ui.config.tipform_save_restart') }}</button>
+        </div>
+        <p v-if="tipform.error" class="error">{{ tipform.error }}</p>
+        <p v-else-if="tipform.savedMsg" class="muted small">{{ tipform.savedMsg }}</p>
+        <p v-if="tipformRestartPending" class="tipform-pending">⚠ {{ t('ui.config.tipform_restart_pending') }}</p>
+        <p class="muted small">{{ t('ui.config.tipform_syntax') }}</p>
+      </div>
+      <p v-else class="muted small">{{ t('ui.config.tipform_unsupported') }}</p>
       <h3>{{ t('ui.config.update_title') }}</h3>
       <p class="muted small">{{ t('ui.config.update_intro') }}</p>
       <div class="update-card">
@@ -530,13 +836,13 @@ reboot</pre>
               class="plugin-iframe"></iframe>
     </section>
   </main>
-  <div v-if="screenPopout && screenAvailable" class="screen-popout" :style="popoutStyle">
+  <div v-if="screenPopout && screenAvailable && !panelMode" class="screen-popout" :style="popoutStyle">
     <div class="screen-popout-head"
          @pointerdown="popoutDragStart"
          @pointermove="popoutDragMove"
          @pointerup="popoutDragEnd"
          @pointercancel="popoutDragEnd">
-      <span>{{ t('ui.dashboard.show_display') }} · {{ screenFps.toFixed(1) }} fps</span>
+      <span>{{ t('ui.dashboard.show_display') }} · {{ screenFps.toFixed(1) }} {{ t('ui.common.fps') }}</span>
       <button class="screen-popout-close" @click.stop="toggleScreenPopout"
               :title="t('ui.common.cancel')">×</button>
     </div>
@@ -548,7 +854,7 @@ reboot</pre>
             @pointercancel.prevent="screenUp"
             @contextmenu.prevent></canvas>
   </div>
-  <div v-if="notifications.length" class="notif-strip"
+  <div v-if="notifications.length && !panelMode" class="notif-strip"
        :class="{shifted: visibleQueue.length}">
     <div class="notif-head">
       <strong>{{ t('ui.notifications.title') }}</strong>
@@ -563,11 +869,11 @@ reboot</pre>
       </div>
     </transition-group>
   </div>
-  <div class="cmd-queue-bar" v-if="visibleQueue.length">
+  <div class="cmd-queue-bar" v-if="visibleQueue.length && !panelMode">
     <div class="queue-controls">
       <button class="queue-toggle" @click="cmdPaused ? resumeQueue() : pauseQueue()"
               :class="{paused: cmdPaused}"
-              :title="cmdPaused ? 'Resume queue' : 'Pause queue'">
+              :title="cmdPaused ? t('ui.queue.resume') : t('ui.queue.pause')">
         <span v-if="cmdPaused">▶</span>
         <span v-else>⏸</span>
       </button>
@@ -581,7 +887,7 @@ reboot</pre>
       </button>
       <button class="queue-clear-err"
               v-if="cmdQueue.some(it => it.status === 'error')"
-              @click="clearAllErrors" title="Clear errors">×!</button>
+              @click="clearAllErrors" :title="t('ui.queue.clear_errors')">×!</button>
     </div>
     <div class="cmd-queue-track">
       <transition-group name="cmd" tag="div" class="cmd-queue-strip">
@@ -594,7 +900,7 @@ reboot</pre>
           <span v-if="it.status === 'running'" class="cmd-spinner">●</span>
           <span v-if="it.status === 'error'"   class="cmd-err-icon">!</span>
           <button v-if="it.status === 'queued' || it.status === 'error'"
-                  class="cmd-del" @click="removeFromQueue(it.id)" title="Remove">×</button>
+                  class="cmd-del" @click="removeFromQueue(it.id)" :title="t('ui.queue.remove')">×</button>
         </div>
       </transition-group>
     </div>
@@ -602,7 +908,9 @@ reboot</pre>
   <div v-if="picker.show" class="overlay" @click.self="closePicker">
     <div class="dialog">
       <h3>
-        {{ t('ui.dialog.picker_title', {ace: dispIdx(picker.ace), slot: dispIdx(picker.slot)}) }}
+        {{ picker.head !== null && picker.head !== undefined
+             ? t('ui.dialog.picker_title_head', {head: dispIdx(picker.head)})
+             : t('ui.dialog.picker_title', {ace: dispIdx(picker.ace), slot: dispIdx(picker.slot)}) }}
         <button v-if="pickerHasRfid" class="rfid-btn" @click="readPickerRfid"
                 :style="pickerRfidStyle"
                 :title="t('ui.dialog.picker_read_rfid_hint')">
@@ -640,7 +948,8 @@ reboot</pre>
       <div class="row">
         <button @click="closePicker">{{ t('ui.common.cancel') }}</button>
         <button @click="savePicker(false)" class="primary">{{ t('ui.dialog.picker_save') }}</button>
-        <button @click="savePicker(true)" :disabled="isToolheadOccupied(picker.ace, picker.slot)">{{ t('ui.dialog.picker_load_after') }}</button>
+        <button v-if="picker.head === null || picker.head === undefined"
+                @click="savePicker(true)" :disabled="isToolheadOccupied(picker.ace, picker.slot)">{{ t('ui.dialog.picker_load_after') }}</button>
       </div>
     </div>
   </div>
@@ -655,11 +964,11 @@ reboot</pre>
       <div class="row">
         <button v-if="!confirmDialog.dismissOnly" @click="cancelConfirm">{{ t('ui.common.cancel') }}</button>
         <button v-if="confirmDialog.altLabel" @click="altConfirm">{{ confirmDialog.altLabel }}</button>
-        <button @click="okConfirm" class="primary">{{ confirmDialog.okLabel || 'OK' }}</button>
+        <button @click="okConfirm" class="primary">{{ confirmDialog.okLabel || t('ui.common.ok') }}</button>
       </div>
     </div>
   </div>
-  <div v-if="preflight.open" class="overlay" @click.self="closePreflight">
+  <div v-if="preflight.open && !panelMode" class="overlay" @click.self="closePreflight">
     <div class="dialog preflight-dialog">
       <h3>
         {{ t('ui.preflight.title') }}
@@ -679,6 +988,10 @@ reboot</pre>
         </div>
       </div>
       <template v-if="preflight.report">
+        <div class="preflight-prefs">
+          <label><input type="checkbox" v-model="preflight.bedMesh"> {{ t('ui.preflight.pref_bed_mesh') }}</label>
+          <label><input type="checkbox" v-model="preflight.camera"> {{ t('ui.preflight.pref_camera') }}</label>
+        </div>
         <template v-if="!preflight.report.head_mode">
         <h4>{{ t('ui.preflight.printer_loadout') }}</h4>
         <div class="preflight-grid">
@@ -688,7 +1001,7 @@ reboot</pre>
             <div class="preflight-swatch"
                  :style="{background: s.color || '#444'}"></div>
             <div class="preflight-meta">
-              <div><strong>ACE {{ dispIdx(s.ace) }} · Slot {{ dispIdx(s.slot) }}</strong></div>
+              <div><strong>{{ aceSlotLabel(s.ace, s.slot) }}</strong></div>
               <div class="muted small">{{ s.material || '?' }}</div>
               <div class="small">{{ s.name }}</div>
               <div class="muted small">{{ s.color || '?' }}<br>RGB({{ rgbDec(s.color) }})</div>
@@ -697,7 +1010,7 @@ reboot</pre>
         </div>
         <h4>{{ t('ui.preflight.slicer_colors') }}</h4>
         <div class="preflight-grid">
-          <div v-for="c in preflight.report.slicer_colors"
+          <div v-for="c in slicerColorsInPrintOrder()"
                :key="'sc-' + c.t"
                class="preflight-card">
             <div class="preflight-swatch"
@@ -762,14 +1075,14 @@ reboot</pre>
                                 :key="'opt-'+m.t+'-'+slotKey(opt)"
                                 :value="slotKey(opt)"
                                 :style="{background: opt.color || '#444', color: textOn(opt.color)}">
-                          ACE {{ dispIdx(opt.ace) }} Slot {{ dispIdx(opt.slot) }} · {{ opt.material || '?' }}
+                          {{ aceSlotLabel(opt.ace, opt.slot) }} · {{ opt.material || '?' }}
                         </option>
                       </select>
                     </template>
                     <template v-else>
                       <span class="preflight-dot"
                             :style="{background: m.slot.color || '#444'}"></span>
-                      ACE {{ dispIdx(m.slot.ace) }} Slot {{ dispIdx(m.slot.slot) }}
+                      {{ aceSlotLabel(m.slot.ace, m.slot.slot) }}
                       <span class="muted small">· {{ m.slot.material || '?' }}</span>
                     </template>
                   </td>
@@ -791,6 +1104,13 @@ reboot</pre>
                       @click="recalcSlicer">
                 {{ t('ui.preflight.recalc') }}
               </button>
+              <button v-if="mode !== 'slicer'"
+                      :disabled="preflight.sending !== '' || preflight.applying !== ''"
+                      @click="applyLoadout(mode)">
+                {{ preflight.applying === mode
+                     ? t('ui.preflight.applying')
+                     : t('ui.preflight.apply_loadout') }}
+              </button>
               <button class="primary"
                       :disabled="preflight.sending !== ''
                                  || (mode === 'slicer' && preflight.slicerDirty)"
@@ -807,7 +1127,7 @@ reboot</pre>
         <template v-else>
           <h4>
             {{ t('ui.preflight.head_mode_title') }}
-            <span class="muted small">- {{ t('ui.preflight.feeder') }} + ACE {{ t('ui.preflight.head') }} {{ dispIdx(preflight.report.ace_head) }}</span>
+            <span class="muted small">- {{ t('ui.preflight.feeder') }} + ACE {{ t('ui.preflight.head') }} {{ (preflight.report.ace_heads && preflight.report.ace_heads.length ? preflight.report.ace_heads : [preflight.report.ace_head]).map(h => 'T' + dispIdx(h)).join(', ') }}</span>
           </h4>
 
           <h4>{{ t('ui.preflight.head_targets') }}</h4>
@@ -825,7 +1145,7 @@ reboot</pre>
           </div>
           <h4>{{ t('ui.preflight.slicer_colors') }}</h4>
           <div class="preflight-grid">
-            <div v-for="c in preflight.report.slicer_colors" :key="'hsc-'+c.t"
+            <div v-for="c in slicerColorsInPrintOrder()" :key="'hsc-'+c.t"
                  class="preflight-card">
               <div class="preflight-swatch"
                    :style="{background: c.hex || '#444'}"></div>
@@ -845,6 +1165,7 @@ reboot</pre>
                 <h4>{{ t('ui.preflight.head_plan_' + hp) }}</h4>
                 <span v-if="headPlanFeasible(hp)" class="muted small">
                   {{ headPlanSwaps(hp) }} {{ t('ui.preflight.swaps_label') }}
+                  <span v-if="headPlanBg(hp)">· {{ headPlanBgLabel(hp) }}</span>
                   <span v-if="hp === 'loadout' && preflight.headDirty"
                         class="preflight-stale">· {{ t('ui.preflight.stale') }}</span>
                 </span>
@@ -867,19 +1188,41 @@ reboot</pre>
                   <tr v-for="c in preflight.report.slicer_colors" :key="'hm-'+c.t"
                       :class="{warn: !headEffectiveTargetId(c.t)}">
                     <td>
-                      <select class="preflight-slot-select"
-                              :style="{background: headTargetColor(headEffectiveTargetId(c.t)),
-                                       color: textOn(headTargetColor(headEffectiveTargetId(c.t)))}"
-                              :value="headEffectiveTargetId(c.t)"
-                              @change="onHeadTargetChange(c.t, $event.target.value)">
-                        <option value="" style="background:#444;color:#fff">— {{ t('ui.preflight.not_feasible') }} —</option>
-                        <option v-for="tg in headTargetOptions(c.t)"
-                                :key="'hmo-'+c.t+'-'+tg.id"
-                                :value="tg.id"
-                                :style="{background: tg.color || '#444', color: textOn(tg.color)}">
-                          {{ headTargetLabel(tg) }}
-                        </option>
-                      </select>
+                      <!-- Custom dropdown: uniform background for every
+                           target (ACE + feeder alike), the filament colour
+                           as a chip NEXT to the label - in the closed button
+                           AND in the open list (native options can't render
+                           a partial-colour chip; Dirk 2026-07-10). Items
+                           pick on mousedown so the button's blur-close
+                           cannot swallow the click. -->
+                      <div class="hm-dd">
+                        <button type="button" class="hm-dd-btn"
+                                @click="hmDdToggle(c.t)"
+                                @keydown.esc="hmDdClose()"
+                                @blur="hmDdClose()">
+                          <span class="hm-dd-chip"
+                                :style="{background: headTargetColor(headEffectiveTargetId(c.t))}"></span>
+                          <span class="hm-dd-label">{{ headTargetLabelById(headEffectiveTargetId(c.t))
+                                || ('— ' + t('ui.preflight.not_feasible') + ' —') }}</span>
+                          <span class="hm-dd-caret">▾</span>
+                        </button>
+                        <div class="hm-dd-list" v-if="hmDropOpen === c.t">
+                          <div class="hm-dd-item"
+                               @mousedown.prevent="hmDdPick(c.t, '')">
+                            <span class="hm-dd-chip" style="background:#444"></span>
+                            <span>— {{ t('ui.preflight.not_feasible') }} —</span>
+                          </div>
+                          <div class="hm-dd-item"
+                               v-for="tg in headTargetOptions(c.t)"
+                               :key="'hmo-'+c.t+'-'+tg.id"
+                               :class="{sel: tg.id === headEffectiveTargetId(c.t)}"
+                               @mousedown.prevent="hmDdPick(c.t, tg.id)">
+                            <span class="hm-dd-chip"
+                                  :style="{background: tg.color || '#444'}"></span>
+                            <span>{{ headTargetLabel(tg) }}</span>
+                          </div>
+                        </div>
+                      </div>
                     </td>
                     <td>←</td>
                     <td>
@@ -925,6 +1268,13 @@ reboot</pre>
                         @click="recalcHead">
                   {{ t('ui.preflight.recalc') }}
                 </button>
+                <button v-if="hp !== 'loadout' && headPlanFeasible(hp)"
+                        :disabled="preflight.sending !== '' || preflight.applying !== ''"
+                        @click="applyLoadout('head', hp)">
+                  {{ preflight.applying === hp
+                       ? t('ui.preflight.applying')
+                       : t('ui.preflight.apply_loadout') }}
+                </button>
                 <button class="primary"
                         :disabled="preflight.sending !== ''
                                    || (hp === 'loadout' && preflight.headDirty)
@@ -946,7 +1296,10 @@ reboot</pre>
     </div>
   </div>
 </div>
-<script src="https://unpkg.com/vue@3.4.21/dist/vue.global.prod.js"></script>
+<!-- Vue is vendored locally (web/frontend/vendor/) so the UI works with no
+     internet at the browser: the CDN reference left the page as a bare,
+     unmounted HTML skeleton whenever unpkg.com was unreachable. -->
+<script src="vendor/vue.global.prod.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
