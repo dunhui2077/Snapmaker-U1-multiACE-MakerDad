@@ -6483,17 +6483,6 @@ class MultiAce:
                     % head)
                 continue
             source = self._head_source.get(head)
-            # A failed/partial load from older builds can leave a source
-            # record with no material identity. Treat it as unloaded so the
-            # active ACE/head slot override is used instead of an unrelated
-            # stale ACE slot (the common reason T0 kept its old colour).
-            if (source and not source.get('type') and not source.get('brand')
-                    and not source.get('subtype')
-                    and str(source.get('color', '')).lstrip('#').upper()
-                    in ('', '000000', '00000000')):
-                logging.info('[multiACE] _push_rfid_info: head %d ignoring '
-                             'empty stale head_source %s' % (head, source))
-                source = None
             if source:
 
                 src_ace = int(source.get('ace_index', 0))
