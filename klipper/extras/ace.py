@@ -5268,7 +5268,7 @@ class MultiAce:
                                                 'FILAMENT_TYPE="%s" '
                                                 'FILAMENT_COLOR_RGBA=%s '
                                                 'VENDOR="%s" '
-                                                'FILAMENT_SUBTYPE="%s"' % (
+                                                'FILAMENT_SUBTYPE="%s" FORCE=1' % (
                                                     head, push_type, push_color, push_vendor, push_subtype))
                                             self._heal_official_skip.pop(head, None)
                                             self._heal_fail_count.pop(head, None)
@@ -6045,7 +6045,7 @@ class MultiAce:
                 'FILAMENT_TYPE="%s" '
                 'FILAMENT_COLOR_RGBA=%s '
                 'VENDOR="%s" '
-                'FILAMENT_SUBTYPE="%s"' % (
+                'FILAMENT_SUBTYPE="%s" FORCE=1' % (
                     head, ftype, color_rgba, vendor, subtype))
             self._ptc_push_block.pop(head, None)
             return True
@@ -6483,6 +6483,17 @@ class MultiAce:
                     % head)
                 continue
             source = self._head_source.get(head)
+            # A failed/partial load from older builds can leave a source
+            # record with no material identity. Treat it as unloaded so the
+            # active ACE/head slot override is used instead of an unrelated
+            # stale ACE slot (the common reason T0 kept its old colour).
+            if (source and not source.get('type') and not source.get('brand')
+                    and not source.get('subtype')
+                    and str(source.get('color', '')).lstrip('#').upper()
+                    in ('', '000000', '00000000')):
+                logging.info('[multiACE] _push_rfid_info: head %d ignoring '
+                             'empty stale head_source %s' % (head, source))
+                source = None
             if source:
 
                 src_ace = int(source.get('ace_index', 0))
@@ -6609,6 +6620,11 @@ class MultiAce:
                     'FILAMENT_SUBTYPE=""' % head)
         for _ln in lines:
             try:
+                # Snapmaker's stock component rejects edits to an official
+                # RFID identity unless FORCE=1. These are internal ACE
+                # synchronisation writes, so always make that intent explicit.
+                if _ln.startswith('SET_PRINT_FILAMENT_CONFIG '):
+                    _ln += ' FORCE=1'
                 self.gcode.run_script_from_command(_ln)
             except Exception as pe:
                 logging.info(
