@@ -45,6 +45,11 @@ from pydantic import BaseModel
 import preflight_core
 
 MOONRAKER_URL = os.environ.get("MOONRAKER_URL", "http://127.0.0.1:7125")
+# G-code scripts must be submitted in order.  A single lock prevents
+# concurrent Fluidd and multiACE clients from racing ACE_SWITCH/refresh
+# batches and building an unbounded Klipper queue.
+_macro_batch_lock = asyncio.Lock()
+_macro_batch_last = {}
 MULTIACE_CFG_PATH = os.environ.get(
     "MULTIACE_CFG_PATH",
     "/home/lava/printer_data/config/extended/ace.cfg",
@@ -1420,14 +1425,27 @@ async def run_macro_batch(req: MacroBatchRequest) -> dict:
         lines.append(" ".join(parts))
     script = "\n".join(lines)
 
+    # Fluidd can emit the same panel-selection batch repeatedly while an
+    # iframe is being refreshed.  Do not enqueue identical work again while
+    # the previous request is still settling.
+    now = time.monotonic()
+    previous = _macro_batch_last.get(script, 0.0)
+    if now - previous < 2.0:
+        return {"ok": True, "count": 0, "deduplicated": True}
+    _macro_batch_last[script] = now
+
     async def _dispatch():
         try:
-            await _mr_post("/printer/gcode/script", {"script": script},
-                           timeout=None)
+            # Moonraker accepts concurrent script requests, but Klipper does
+            # not preserve their ordering.  Serialise batches so an ACE_SWITCH
+            # cannot race a refresh/save command and leave the UI waiting.
+            async with _macro_batch_lock:
+                await _mr_post("/printer/gcode/script", {"script": script},
+                               timeout=None)
         except Exception as e:
             _trace.warning("macro-batch dispatch failed: %s", e)
 
-    asyncio.create_task(_dispatch())
+    await _dispatch()
     _trace.info("macro-batch: dispatched %d commands to Moonraker", len(lines))
     return {"ok": True, "count": len(lines), "script_lines": lines}
 

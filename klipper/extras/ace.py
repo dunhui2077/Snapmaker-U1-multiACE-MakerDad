@@ -1,6 +1,7 @@
 import logging
 import logging.handlers
 import json
+import base64
 import math
 import queue
 import threading
@@ -6938,6 +6939,17 @@ class MultiAce:
     def _restore_head_source(self):
 
         saved = self.save_variables.allVariables.get(self.VARS_ACE_HEAD_SOURCE, None)
+        # Newer builds store this payload as a base64 string.  SAVE_VARIABLE
+        # treats '#' as a comment and quoted material metadata can contain
+        # arbitrary punctuation, so passing the raw dict through G-code is
+        # unsafe.  Keep the old dict format readable for upgrades.
+        if isinstance(saved, str) and saved.startswith('b64:'):
+            try:
+                decoded = base64.b64decode(saved[4:].encode('ascii'), validate=True)
+                saved = json.loads(decoded.decode('utf-8'))
+            except Exception:
+                logging.exception('[multiACE] unable to decode persisted head_source')
+                saved = None
         if saved and isinstance(saved, dict):
             for head in range(4):
                 key = str(head)
@@ -6998,26 +7010,16 @@ class MultiAce:
                 head, ace_index, target_slot, module, channel))
 
     def _save_head_source(self):
-
-        save_data = {}
-        for head in range(4):
-            source = self._head_source[head]
-            if isinstance(source, dict):
-                # G-code treats '#' as a comment marker. Normalise maps saved
-                # by older builds too, not only new source-repair mappings.
-                source = source.copy()
-                color = source.get('color')
-                if isinstance(color, str):
-                    source['color'] = color.lstrip('#')
-                    self._head_source[head]['color'] = source['color']
-            save_data[str(head)] = source
-
-        value_str = (json.dumps(save_data)
-                     .replace(': true', ': True')
-                     .replace(': false', ': False')
-                     .replace(': null', ': None'))
+        save_data = {str(head): self._head_source.get(head)
+                     for head in range(4)}
+        # Encode before handing the value to the G-code parser.  This avoids
+        # comment markers, quotes, whitespace, and non-ASCII text corrupting
+        # SAVE_VARIABLE's ast.literal_eval input and taking Klipper down.
+        payload = json.dumps(save_data, ensure_ascii=False,
+                             separators=(',', ':')).encode('utf-8')
+        value_str = 'b64:' + base64.b64encode(payload).decode('ascii')
         self.gcode.run_script_from_command(
-            "SAVE_VARIABLE VARIABLE=%s VALUE='%s'"
+            "SAVE_VARIABLE VARIABLE=%s VALUE='%r'"
             % (self.VARS_ACE_HEAD_SOURCE, value_str))
 
     def head_is_manual(self, head):
