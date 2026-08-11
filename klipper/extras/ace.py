@@ -7053,8 +7053,11 @@ class MultiAce:
         payload = json.dumps(save_data, ensure_ascii=False,
                              separators=(',', ':')).encode('utf-8')
         value_str = 'b64:' + base64.b64encode(payload).decode('ascii')
+        # Klipper strips ordinary G-code value quotes before SAVE_VARIABLE
+        # calls ast.literal_eval().  Preserve one Python string quote layer
+        # explicitly; b64: itself is not a Python literal.
         self.gcode.run_script_from_command(
-            "SAVE_VARIABLE VARIABLE=%s VALUE='%r'"
+            "SAVE_VARIABLE VARIABLE=%s VALUE=\"'%s'\""
             % (self.VARS_ACE_HEAD_SOURCE, value_str))
 
     def head_is_manual(self, head):
