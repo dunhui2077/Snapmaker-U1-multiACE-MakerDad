@@ -70,3 +70,8 @@
 - 修复 `ACE_REPAIR_HEAD_SOURCE` 保存材料来源时，颜色、品牌或其他特殊字符破坏 `SAVE_VARIABLE` 字面量并触发 Klipper `Internal error on command:"SAVE_VARIABLE"` 的问题。头部来源现在以带 `b64:` 前缀的 UTF-8 Base64 字符串持久化，同时兼容旧版字典格式。
 - 修复 Fluidd 与 multiACE 页面重复提交 `ACE_SWITCH + MULTIACE_REFRESH_OVERRIDES` 的问题。后端对批次加锁并在 2 秒内合并完全相同的请求，避免 G-code 队列堆积、`wait_ace_ready` 长时间 busy 以及 ACE 串口断连。
 - 本修复不改变自动烘干温度、湿度、排湿口和打印联动规则；只修复持久化和请求调度路径。
+
+### 原厂屏幕退料保护
+
+- 修复原厂屏幕退料流程中发生无效 `SAVE_VARIABLE` 参数时，`SyntaxError` 未被原厂保存组件捕获并导致 Klipper SHUTDOWN 的问题。
+- 现在无效保存请求只会返回普通 G-code 错误，不会关闭 Klipper；日志会保留原始参数，供后续定位发送方。

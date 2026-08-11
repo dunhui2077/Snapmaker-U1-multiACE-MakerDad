@@ -438,6 +438,7 @@ class MultiAce:
         self._slot_overrides_mtime = 0.0
 
         self._orig_set_ptc = None
+        self._orig_save_variable = None
         self._raw_set_ptc = None
         self._expected_ptc_pushes = []
 
@@ -1843,6 +1844,21 @@ class MultiAce:
         self._spawn_multiace_web()
 
         self._refresh_slot_overrides()
+
+        # Stock save_variables only catches ValueError.  ast.literal_eval()
+        # also raises SyntaxError for malformed values, which otherwise
+        # escapes the G-code dispatcher and shuts Klipper down.  Screen-side
+        # unload flows can emit one of those values, so turn it into a normal
+        # command error and preserve the raw input in the log for diagnosis.
+        try:
+            self._orig_save_variable = self.gcode.register_command(
+                'SAVE_VARIABLE', None)
+            if self._orig_save_variable is not None:
+                self.gcode.register_command(
+                    'SAVE_VARIABLE', self._guard_save_variable,
+                    desc='[multiACE] guarded persistent variable write')
+        except Exception as e:
+            logging.info('[multiACE] failed to guard SAVE_VARIABLE: %s' % e)
 
         try:
             fd = self.printer.lookup_object('filament_detect', None)
@@ -6130,6 +6146,20 @@ class MultiAce:
                     and self._norm_subtype(exp.get('subtype', '')) == norm_sub):
                 return i
         return None
+
+    def _guard_save_variable(self, gcmd):
+        """Prevent malformed persistence data from shutting down Klipper."""
+        try:
+            return self._orig_save_variable(gcmd)
+        except (SyntaxError, ValueError, TypeError) as e:
+            try:
+                raw = gcmd.get_raw_command_parameters()
+            except Exception:
+                raw = '<unavailable>'
+            logging.error('[multiACE] rejected malformed SAVE_VARIABLE: %s; '
+                          'parameters=%r', e, raw)
+            raise gcmd.error(
+                '[multiACE] SAVE_VARIABLE value is invalid; setting was not saved')
 
     def _wrap_set_print_filament_config(self, gcmd):
         """Replacement handler for SET_PRINT_FILAMENT_CONFIG. Always
