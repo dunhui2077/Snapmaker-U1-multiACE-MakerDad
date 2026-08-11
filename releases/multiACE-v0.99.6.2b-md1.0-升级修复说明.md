@@ -33,10 +33,10 @@
 
 - 修复 Web 前端“退出所有材料”完成后保存工具头材料来源时可能触发
   `Internal error on command:"SAVE_VARIABLE"` 并使 Klipper SHUTDOWN 的问题。
-- 根因是来源映射的 `b64:` 数据在 G-code 参数解析时丢失字符串引号；现在按
-  Klipper 所需格式保留 Python 字面量引号，映射可正常写入。
-- `save_variables.py` 同时捕获 `SyntaxError`；即使未来收到无效保存值，也只会
-  返回普通命令错误，不会关闭 Klipper。
+- 根因是 G-code 参数解析会剥离映射数据的字符串引号；`save_variables.py` 现在
+  校验并接受 `b64:` 格式的 UTF-8/Base64 来源映射，退料后可正常清空并保存映射。
+- 同时捕获 `SyntaxError`；即使未来收到无效保存值，也只会返回普通命令错误，
+  不会关闭 Klipper。
 
 ## 本次补充
 
