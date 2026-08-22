@@ -81,6 +81,10 @@
   设备状态，避免降低页面状态刷新速度。
 ## 1.0 热修复：ACE 长时间烘干断连与 Web 延迟
 
+- 修复手动烘干已启动但 Web "开始/工作" 按钮不亮的问题。收到 `ACE_DRY` 后立即写入
+  独立的手动烘干运行状态，状态轮询会立刻返回 `manual_dry.active=true`；仅当 ACE2 明确
+  拒绝命令时才回滚。该修复不增加串口等待或前端队列操作，因此不会降低 Web 响应速度。
+
 - 修复 `ACE_REPAIR_HEAD_SOURCE` 保存材料来源时，颜色、品牌或其他特殊字符破坏 `SAVE_VARIABLE` 字面量并触发 Klipper `Internal error on command:"SAVE_VARIABLE"` 的问题。头部来源现在以带 `b64:` 前缀的 UTF-8 Base64 字符串持久化，同时兼容旧版字典格式。
 - 修复 Fluidd 与 multiACE 页面重复提交 `ACE_SWITCH + MULTIACE_REFRESH_OVERRIDES` 的问题。后端对批次加锁并在 2 秒内合并完全相同的请求，避免 G-code 队列堆积、`wait_ace_ready` 长时间 busy 以及 ACE 串口断连。
 - 本修复不改变自动烘干温度、湿度、排湿口和打印联动规则；只修复持久化和请求调度路径。
